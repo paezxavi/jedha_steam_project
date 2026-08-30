@@ -1,0 +1,14 @@
+# Steam — Big Data EDA of the Steam catalogue, PySpark on Databricks
+# The notebook's target runtime is Databricks (nothing to install there).
+# This file is for re-running it locally:
+#   python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+# A JDK 17 must be on PATH or in JAVA_HOME — Spark needs it.
+
+pyspark==3.5.3              # same DataFrame API as Databricks Runtime 15/16
+pandas==3.0.5               # local display() shim: Spark DataFrame -> rendered table
+pyarrow==25.0.1             # toPandas() transfer
+setuptools==84.0.0          # pyspark 3.5 still imports distutils, gone from Python 3.12
+
+ipykernel==7.3.0            # Jupyter kernel for steam_project.ipynb
+nbformat==5.11.1
+nbclient==0.11.0            # only to execute the notebook headlessly; no cell uses it

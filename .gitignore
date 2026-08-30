@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+build/__pycache__/
+data/steam_game_output.json
+jedha_steam___instructions.txt
