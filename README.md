@@ -99,6 +99,13 @@ The notebook is written for Databricks and imports either as `.ipynb` or as
 3. Every table comes out of a `display()` call, so Databricks' visualisation tool can chart it
    in place. Each one is preceded by a `*Chart: …*` line saying which chart to build.
 
+Serverless compute runs Spark 4.2 and has no `cache()`. The two frames the notebook re-reads
+most — the cleaned `games` and the exploded `genre_rows` — go through `materialise()` instead,
+which writes them as the Delta tables `workspace.default.steam_games` and
+`workspace.default.steam_genre_rows`. That matters here: the source JSON is a single line, so it
+is non-splittable and every uncached action re-parses all 61 MB in one task. Locally the same
+function just calls `cache()`.
+
 ### Screenshots for the jury
 
 Databricks removed the **Publish** button, so the deliverable is the notebook plus screenshots of
@@ -128,9 +135,10 @@ curl -o data/steam_game_output.json \
 ```
 
 Then open `steam_project.ipynb` with the `.venv` kernel. The first cell detects that it is not on
-Databricks, builds a local Spark session and defines a `display()` that renders Spark DataFrames
-as tables — every other cell is identical in both environments. A **JDK 17** must be reachable
-through `JAVA_HOME`.
+Databricks, builds a local Spark session and defines the `display()` and `materialise()` that
+Databricks provides itself — every other cell is identical in both environments. A **JDK 17**
+must be reachable through `JAVA_HOME`. Local Spark is 3.5.3 against 4.2 on serverless; the
+DataFrame API this notebook uses is unchanged between them.
 
 ## Layout
 

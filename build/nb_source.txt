@@ -9,11 +9,39 @@ Jedha *Full Stack Data Scientist* — **Block 2, Big Data Project**. PySpark on 
 
 Ubisoft wants to launch a new game and asked for a global reading of the Steam marketplace
 before the concept is locked. The brief lists a dozen questions on three levels — the market as
-a whole, genres, and platforms. This notebook answers them in that order, and each level closes
-on the one thing it changes in the product brief: **genre, price, platforms, languages, release
-window, age rating.**
+a whole, genres, and platforms. This notebook takes the three levels in that order, and each one
+closes on the one thing it changes in the product brief: **genre, price, platforms, languages,
+release window, age rating.**
 
 Section 6 collects those six decisions. Section 7 says what this dataset cannot decide.
+
+## Where each question is answered
+
+| # | The brief asks | Answered in |
+|---|---|---|
+| | ***Macro*** | |
+| 1 | Which publisher has released the most games on Steam? | 3.1 |
+| 2 | What are the best rated games? | **3.6** |
+| 3 | Are there years with more releases? More or fewer during Covid? | 3.2 |
+| 4 | How are the prices distributed? Are there many games with a discount? | 3.3 |
+| 5 | What are the most represented languages? | 3.4 |
+| 6 | Are there many games prohibited for children under 16/18? | 3.5 |
+| | ***Genres*** | |
+| 7 | What are the most represented genres? | 4.1 |
+| 8 | Are there any genres with a better positive/negative review ratio? | 4.2 |
+| 9 | Do some publishers have favourite genres? | 4.3 |
+| 10 | What are the most lucrative genres? | 4.4 |
+| | ***Platforms*** | |
+| 11 | Are most games available on Windows/Mac/Linux? | 5.1 |
+| 12 | Do certain genres tend to be available on certain platforms? | 5.2 |
+
+Question 2 closes the macro level instead of coming second: 3.2 to 3.5 each end on a product
+decision, while the best-rated list produces a benchmark to hit rather than a choice to make.
+
+Four sections go beyond the list, because the brief's stated goal — *what factors affect the
+popularity or sales of a video game* — needs them. **2.11** defines what success means in a
+dataset that holds no sales figure, **4.5** tests whether any genre is actually emerging, **4.6**
+locates the genre-and-price slot, and **5.3** asks whether porting pays once price is held equal.
 
 ## The data
 
@@ -32,6 +60,10 @@ The notebook is written for **Databricks**, and falls back to a local Spark sess
 can be re-run outside a workspace. Everything below this cell is identical in both cases,
 including the `display()` calls that drive Databricks' visualisation tool.
 
+Two things differ per environment and are hidden behind the same names: `display()`, and
+`materialise()` — serverless compute has no `cache()`, so a frame that many later cells re-read
+is written to a Delta table there, and simply cached locally.
+
 #%% code
 import os
 
@@ -46,6 +78,13 @@ if IS_DATABRICKS:
     if not os.path.exists(DATA_PATH):
         import urllib.request
         urllib.request.urlretrieve(SOURCE_URL, DATA_PATH)
+
+    def materialise(df, name):
+        # No cache() on serverless. A Delta table costs one write and turns the
+        # non-splittable JSON into columnar storage for every read that follows.
+        table = f"workspace.default.{name}"
+        df.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(table)
+        return spark.table(table)
 else:
     # Local run: build the session by hand and emulate Databricks' display().
     from pyspark.sql import SparkSession, DataFrame
@@ -62,6 +101,9 @@ else:
 
     def display(x, n=1000):
         _ipython_display(x.limit(n).toPandas() if isinstance(x, DataFrame) else x)
+
+    def materialise(df, name):
+        return df.cache()
 
     DATA_PATH = "data/steam_game_output.json"
 
@@ -239,10 +281,12 @@ display(games.filter(F.col("languages").contains("(")).select("name", "languages
 ### 2.5 Publisher names
 
 Ubisoft appears under five spellings, two of which differ only by a trademark sign or four
-trailing tabs. Trimming whitespace and stripping `®`/`™` rewrites 271 rows; it does **not**
-merge `Ubisoft` with `Ubisoft Entertainment`, and it should not — deciding that two different
-company names are the same firm is a judgement call, not a cleaning rule. The publisher counts in
-section 3.1 are therefore a floor, not an exact figure.
+trailing tabs. Trimming whitespace and stripping `®`/`™` rewrites 271 rows and empties 134
+more that held nothing but whitespace — 405 changes in all. The report in 2.10 therefore
+compares with `eqNullSafe` and not `!=`, or SQL's `NULL != 'x' -> NULL` would silently drop
+those 134. It does **not** merge `Ubisoft` with `Ubisoft Entertainment`, and it should not —
+deciding that two different company names are the same firm is a judgement call, not a cleaning
+rule. The publisher counts in section 3.1 are therefore a floor, not an exact figure.
 
 The field also holds co-publisher lists (`Team17, NEXT Studios`), but 3 215 rows contain a comma
 and most of them are `Ltd.`-style suffixes, so splitting on it would create more noise than it
@@ -253,9 +297,7 @@ def normalise_name(column):
     cleaned = F.trim(F.regexp_replace(F.regexp_replace(F.col(column), r"[®™]", ""), r"\s+", " "))
     return F.when(cleaned != "", cleaned)
 
-games = (games
-    .withColumn("publisher_clean", normalise_name("publisher"))
-    .withColumn("developer_clean", normalise_name("developer")))
+games = games.withColumn("publisher_clean", normalise_name("publisher"))
 
 print("distinct publisher strings:", games.select("publisher").distinct().count(),
       "-> after normalisation:", games.select("publisher_clean").distinct().count())
@@ -323,11 +365,14 @@ display(games.filter(F.col("positive_ratio") == 1)
              .orderBy("reviews").limit(5))
 
 #%% md
-### 2.9 Platforms, and a revenue proxy
+### 2.9 Platforms, and a value proxy
 
-The `platforms` struct becomes three flags and a count. Revenue is not in the dataset; the
-closest available stand-in is **owners x list price**, which section 4.4 uses and section 7
-takes apart.
+The `platforms` struct becomes three flags and a count. Revenue is not in the dataset, and
+nothing here stands in for it: `owners` counts copies *held*, not copies bought — bundles, gift
+keys and free weekends all land in it — and `initialprice` is the list price, not a price anyone
+paid. Their product is named for what it is, **`owners_x_price`: the list-price value of every
+copy in circulation**. The rankings in sections 3 and 4 use it as a sort key; section 7 takes it
+apart.
 
 #%% code
 games = (games
@@ -337,9 +382,9 @@ games = (games
     .withColumn("n_platforms", F.col("platforms.windows").cast("int")
                              + F.col("platforms.mac").cast("int")
                              + F.col("platforms.linux").cast("int"))
-    .withColumn("revenue_proxy", F.col("owners_mid") * F.col("initial_price_usd")))
+    .withColumn("owners_x_price", F.col("owners_mid") * F.col("initial_price_usd")))
 
-games = games.cache()
+games = materialise(games, "steam_games")
 print(f"{games.count():,} games ready, {len(games.columns)} columns")
 
 #%% md
@@ -347,16 +392,27 @@ print(f"{games.count():,} games ready, {len(games.columns)} columns")
 
 #%% code
 report = spark.createDataFrame([
-    ("2.1  drop type != 'game'",            games.count(),  raw.count() - games.count()),
-    ("2.2  price strings -> USD",           games.count(),  games.filter(F.col("discount_pct") > 0).count()),
-    ("2.3  release_date -> date",           games.count(),  games.filter(F.col("release_date_parsed").isNull()).count()),
-    ("2.4  genre -> array",                 games.count(),  games.filter(F.col("n_genres") == 0).count()),
-    ("2.4  languages -> array",             games.count(),  games.filter(F.col("n_languages") == 0).count()),
-    ("2.5  publisher name normalised",      games.count(),  games.filter(F.col("publisher") != F.col("publisher_clean")).count()),
-    ("2.6  owners bracket -> bounds",       games.count(),  games.filter(F.col("owners_min").isNull()).count()),
-    ("2.7  required_age -> 0-21 or NULL",   games.count(),  games.filter(F.col("age_rating").isNull()).count()),
-    ("2.8  reviews -> Wilson score",        games.count(),  games.filter(F.col("wilson_score").isNull()).count()),
-], ["rule", "rows_in", "rows_affected_or_null"])
+    ("2.1   drop type != 'game'",           games.count(), "rows dropped",
+     raw.count() - games.count()),
+    ("2.2   price strings -> USD",          games.count(), "non-numeric source",
+     games.filter(~F.col("price").rlike(r"^-?\d+$")
+                | ~F.col("initialprice").rlike(r"^-?\d+$")
+                | ~F.col("discount").rlike(r"^-?\d+$")).count()),
+    ("2.3   release_date -> date",          games.count(), "source empty -> NULL",
+     games.filter(F.col("release_date_parsed").isNull()).count()),
+    ("2.4a  genre -> array",                games.count(), "source empty -> []",
+     games.filter(F.col("n_genres") == 0).count()),
+    ("2.4b  languages -> array",            games.count(), "source empty -> []",
+     games.filter(F.col("n_languages") == 0).count()),
+    ("2.5   publisher name normalised",     games.count(), "values rewritten",
+     games.filter(~F.col("publisher").eqNullSafe(F.col("publisher_clean"))).count()),
+    ("2.6   owners bracket -> bounds",      games.count(), "unparsed -> NULL",
+     games.filter(F.col("owners_min").isNull()).count()),
+    ("2.7   required_age -> 0-21 or NULL",  games.count(), "out of range -> NULL",
+     games.filter(F.col("age_rating").isNull()).count()),
+    ("2.8   reviews -> Wilson score",       games.count(), "no reviews -> NULL",
+     games.filter(F.col("wilson_score").isNull()).count()),
+], ["rule", "rows_in", "measured", "n"])
 
 display(report)
 #%% md
@@ -395,49 +451,74 @@ def outcome(df, *group_by):
 #%% code
 by_publisher = (games.groupBy("publisher_clean")
     .agg(F.count("*").alias("games"),
-         F.round(F.sum("revenue_proxy") / 1e6).alias("revenue_proxy_musd"))
+         F.round(F.sum("owners_x_price") / 1e6).alias("owners_x_price_musd"))
     .filter(F.col("publisher_clean").isNotNull()))
 
 display(by_publisher.orderBy(F.desc("games")).limit(20))
+
+display(games.select(
+    F.countDistinct("publisher_clean").alias("named_publishers"),
+    F.count("*").alias("games"),
+    F.sum(F.col("publisher_clean").isNull().cast("int")).alias("no_publisher")))
 
 #%% md
 **Big Fish Games** has released the most games — 423, casual hidden-object titles — ahead of
 8floor (202) and SEGA (165). Ubisoft is tenth with 128.
 
 That ranking says less than the shape behind it. Steam has **29 824 named publishers for
-55 690 games** (134 of which carry no publisher and sit outside every table here), and the
-concentration is the finding:
+55 690 games** (134 of which carry no publisher, and so appear in none of the rankings above),
+and the concentration is the finding:
 
 #%% code
-concentration = (by_publisher
+buckets = (by_publisher
     .withColumn("size", F.when(F.col("games") == 1, "1 game")
                          .when(F.col("games") <= 5, "2-5 games")
                          .when(F.col("games") <= 20, "6-20 games")
                          .otherwise("21+ games"))
-    .groupBy("size").agg(F.count("*").alias("publishers"), F.sum("games").alias("games"))
+    .groupBy("size").agg(F.count("*").alias("publishers"), F.sum("games").alias("games")))
+
+# by_publisher drops the games with no publisher, so the buckets cover 55 556 of the 55 690.
+# The residual row keeps the numerator on the same population as the denominator below.
+orphans = (games.filter(F.col("publisher_clean").isNull())
+    .groupBy(F.lit("no publisher").alias("size"))
+    .agg(F.lit(0).cast("long").alias("publishers"), F.count("*").alias("games")))
+
+concentration = (buckets.unionByName(orphans)
     .withColumn("pct_of_catalogue", F.round(100 * F.col("games") / games.count(), 1)))
 
-display(concentration.orderBy("publishers"))
+display(concentration.orderBy(F.col("size") == "no publisher", "publishers"))
 
 #%% md
 **41% of the catalogue comes from publishers that have released exactly one game**, and the
 twenty largest publishers together account for 5% of releases. Steam is not a market of a few
 big houses — it is a very long tail with a handful of large firms on the end of it.
 
-Rank the same publishers by the revenue proxy instead of by volume and a different set of names
-appears, Ubisoft first among them.
+Rank the same publishers by `owners_x_price` instead of by volume and a different set of names
+appears. The table below drops the one-game publishers — 23 018 of the 29 824, and the only
+group whose total is a single title by construction. Above that the concentration falls off
+smoothly rather than at a threshold, so `value_per_game_musd` is read next to `games`: on three
+or four releases it is still close to one title's figure.
 
-*Chart: bar, `publisher_clean` x `revenue_proxy_musd`.*
+*Chart: bar, `publisher_clean` x `owners_x_price_musd`.*
 
 #%% code
-display(by_publisher.filter(F.col("games") >= 5)
-                    .withColumn("revenue_per_game_musd", F.round(F.col("revenue_proxy_musd") / F.col("games"), 1))
-                    .orderBy(F.desc("revenue_proxy_musd")).limit(20))
+display(by_publisher.filter(F.col("games") >= 2)
+                    .withColumn("value_per_game_musd", F.round(F.col("owners_x_price_musd") / F.col("games"), 1))
+                    .orderBy(F.desc("owners_x_price_musd")).limit(20))
 
 #%% md
-Volume and revenue are close to unrelated: Big Fish Games' 423 releases are worth less than
-CD PROJEKT RED's 7. **For Ubisoft the competitor set is not "everyone on Steam"** — it is the
-thirty-odd publishers in this table.
+Volume and value are close to unrelated. **Big Fish Games leads on releases with 423 and comes
+177th of the 6 806 publishers with more than one game once the same list is ranked by
+`owners_x_price`.** **For Ubisoft the competitor set is not "everyone on Steam"** — it is the thirty-odd
+publishers in this table.
+
+One caveat on the order. `publisher` is free text, so this ranks spellings, not firms. Across the
+catalogue 175 names appear under 355 different spellings (6.0% of the proxy), and 2 060 strings
+credit several parties at once (16.7%) — 959 of those name a partner that also publishes under
+its own name, which detaches 12.4% of the proxy from firms already present in the ranking. A firm
+that co-publishes and ships Mac and Linux ports is split across many rows; one that always writes
+its name the same way is not. The order rewards naming consistency as much as size, so what this
+table identifies is the set of names, not their sequence.
 
 ## 3.2 The release calendar
 
@@ -501,14 +582,24 @@ release is off this chart entirely.
 *Chart: combo — bars `games`, line `breakout_pct`, on `band`.*
 
 #%% code
-price_band = (F.when(F.col("is_free"), "0 free")
-               .when(F.col("price_usd") < 5, "1 under $5")
-               .when(F.col("price_usd") < 10, "2 $5-10")
-               .when(F.col("price_usd") < 20, "3 $10-20")
-               .when(F.col("price_usd") < 40, "4 $20-40")
-               .otherwise("5 $40+"))
+# band_rank carries the ordering, so the labels can read as prices and nothing else
+band_rank = (F.when(F.col("is_free"), 0)
+              .when(F.col("price_usd") < 5, 1)
+              .when(F.col("price_usd") < 10, 2)
+              .when(F.col("price_usd") < 20, 3)
+              .when(F.col("price_usd") < 40, 4)
+              .otherwise(5))
 
-display(outcome(games.withColumn("band", price_band), "band").orderBy("band"))
+price_band = (F.when(band_rank == 0, "free")
+               .when(band_rank == 1, "under $5")
+               .when(band_rank == 2, "$5-10")
+               .when(band_rank == 3, "$10-20")
+               .when(band_rank == 4, "$20-40")
+               .otherwise("$40+"))
+
+display(outcome(games.withColumn("rank", band_rank).withColumn("band", price_band),
+                "rank", "band")
+        .orderBy("rank").drop("rank"))
 
 #%% md
 Every step up the price ladder buys more of both measures: from 15 median reviews and a 5.9%
@@ -520,7 +611,22 @@ it charges $30 because it built something that can carry the price. What the tab
 that the $20-40 band is **where games of Ubisoft's scale actually live**, and that pricing a
 premium title below $20 puts it among games that are not competing for the same attention.
 
-**Decision — price: $29.99 to $39.99.**
+That band is not a continuum. Four price points hold 2 310 of its 2 394 games:
+
+#%% code
+display(outcome(games.filter((F.col("price_usd") >= 20) & (F.col("price_usd") < 40)), "price_usd")
+        .filter(F.col("games") >= 50).orderBy("price_usd"))
+
+#%% md
+**$24.99 and $29.99 carry almost the same number of games — 862 and 865 — and not the same
+outcome: 170 median reviews against 496, a 24.9% breakout rate against 36.0%.** Five dollars
+apart, on samples that size, that is the cleanest comparison in this section. And $34.99 breaks
+the ladder rather than continuing it: 155 games, 27.1%, below $29.99. What the band rewards is
+not a higher number, it is landing on one of the two anchors the market reads as premium.
+
+**Decision — price: $29.99 or $39.99.** Which of the two is a budget question, not a market one:
+$39.99 does better on both measures — 730 median reviews, 39.5% — because that is where AAA
+productions sit, and it is their scale doing the work, not their label.
 
 #%% code
 display(games.filter(F.col("discount_pct") > 0).select(
@@ -542,7 +648,10 @@ question.
 #%% code
 by_language = (games.select(F.explode("languages_list").alias("language"))
                     .groupBy("language").agg(F.count("*").alias("games")))
-display(by_language.orderBy(F.desc("games")).limit(20))
+
+display(by_language
+    .withColumn("pct_of_games", F.round(100 * F.col("games") / games.count(), 1))
+    .orderBy(F.desc("games")).limit(20))
 
 #%% md
 **English is on 99% of the catalogue** and is not a decision. The next tier is: German (14 019),
@@ -564,26 +673,51 @@ display(outcome(games.withColumn("languages", language_band), "languages")
 
 #%% md
 Localisation tracks success up to about twenty languages — 16 median reviews and a 7% breakout
-rate for English-only, **360 reviews and 39% at 15-20 languages** — and then collapses at 21+.
+rate at a single language, **360 reviews and 39% at 15-20 languages** — and then collapses at 21+.
 
-That collapse is not a finding, it is a cluster of shovelware. The 1 265 games listing 21 or more
-languages are dominated by a handful of publishers pushing dozens of near-identical $0.99 titles,
-each shipped with every language Steam offers:
+That collapse mixes two things: how many languages a game ships, and what it costs — price being
+the strongest predictor in this section. Holding the price band fixed separates them, the way 5.3
+does for ports:
 
 #%% code
-display(games.filter(F.col("n_languages") >= 21)
-             .groupBy("publisher_clean")
-             .agg(F.count("*").alias("games"),
-                  F.round(F.avg("price_usd"), 2).alias("mean_price"),
-                  F.percentile_approx("reviews", 0.5).alias("median_reviews"))
-             .orderBy(F.desc("games")).limit(10))
+display(outcome(games.filter((F.col("price_usd") >= 10) & (F.col("price_usd") < 20))
+                     .withColumn("languages", language_band), "languages")
+        .orderBy(F.desc("median_reviews")))
 
 #%% md
-Adding a language string costs nothing and proves nothing. The band that means something is
-10-20, where the localisation is real work.
+The collapse survives the control. Among games priced $10-20, **21 languages or more returns 60
+median reviews and a 26.3% breakout rate, against 816 and 42.3% at 15-20 languages** and 703 and
+38.8% at 10-14 — it lands just above the 2-4 band. Adding a language string costs nothing and
+proves nothing. The band that means something is 10-20, where the localisation is real work.
 
-**Decision — languages: twelve — EN, DE, FR, RU, zh-Hans, ES, JA, IT, then KO, pt-BR, PL and
-zh-Hant.**
+How far into that band to go is the actual decision, and counting one language at a time answers
+it:
+
+#%% code
+display(outcome(games.filter(F.col("n_languages").between(9, 15)), "n_languages")
+        .orderBy("n_languages"))
+
+#%% md
+**Every language added pays up to the thirteenth — 175 median reviews and a 28.7% breakout rate at
+nine, 696 and 43.2% at thirteen — and the fourteenth takes it back: 299 and 34.8% over 408
+games.** That reversal is the return threshold, and it settles the count on its own.
+
+Which thirteen is a second question, and the catalogue ranking above is the wrong one to answer
+it. What matters is the languages the games that actually reached scale ship:
+
+#%% code
+display(games.filter(F.col("owners_min") >= 100000)
+             .select(F.explode("languages_list").alias("language"))
+             .groupBy("language").agg(F.count("*").alias("breakout_games"))
+             .orderBy(F.desc("breakout_games")).limit(15))
+
+#%% md
+The two rankings agree on the set — the same twelve names lead both, reordered, with Spanish and
+Italian higher among the games that broke out than in the catalogue at large. The thirteenth is
+**Turkish**, which sits fourteenth by catalogue volume and thirteenth here.
+
+**Decision — languages: thirteen — EN, DE, FR, ES, RU, IT, zh-Hans, JA, pt-BR, PL, KO, zh-Hant
+and TR.**
 
 ## 3.5 Age restriction
 
@@ -633,25 +767,56 @@ display(games.filter(F.col("positive_ratio") == 1)
 
 #%% md
 Ranking on the raw ratio returns 8 634 games tied at 100%, most of them on one or two reviews.
-The Wilson lower bound breaks the tie by asking how much evidence sits behind the score; with a
-floor of 500 reviews it produces a list that means something.
+The Wilson lower bound breaks the tie by asking how much evidence sits behind the score. No
+review floor is applied below: thin evidence is exactly what the bound already discounts, and
+adding a threshold on top would only hide the fact that it works.
 
 #%% code
-display(games.filter(F.col("reviews") >= 500)
-             .select("name", "publisher_clean", "reviews",
+display(games.select("name", "publisher_clean", "reviews",
                      F.round("positive_ratio", 4).alias("positive_ratio"),
                      F.round("wilson_score", 4).alias("wilson_score"),
                      "release_year")
              .orderBy(F.desc("wilson_score")).limit(15))
 
 #%% md
-The top of the list is not made of blockbusters. *Aseprite* is a pixel-art editor, *A Short Hike*
-and *Patrick's Parabox* are one-person indie games, and the highest-rated large title is
-**Portal 2 at 98.8% over 309 441 reviews** — which is the more useful benchmark, because
-sustaining that ratio at that volume is the hard part.
+Two of the 8 634 perfect scores survive it — *The Void Rains Upon Her Heart* on 496 reviews and
+*祈風 Inorikaze* on 327 — and the other 8 632 do not. Those two are the largest of the group, which
+is the bound working rather than leaking.
 
-**Reference point — a Ubisoft-scale title doing well on Steam sits near 90% positive; 95%+ at
-100 000+ reviews is exceptional.**
+The top of the list is not made of blockbusters. *Aseprite* is a pixel-art editor, *A Short Hike*
+and *Patrick's Parabox* are one-person indie games, and the only two titles holding that ratio at
+scale are **People Playground at 98.9% over 144 569 reviews and Portal 2 at 98.8% over 309 441** —
+the more useful benchmark, because sustaining the ratio at that volume is the hard part.
+
+Where Ubisoft's own catalogue sits against that needs the review volume held constant: the
+positive ratio climbs with the number of reviews, so comparing Ubisoft to the catalogue at large
+would be comparing it to 39 195 games nobody reviewed.
+
+#%% code
+ubisoft = F.col("publisher_clean").rlike("(?i)^ubisoft")
+
+review_rank = (F.when(F.col("reviews") < 10, 0).when(F.col("reviews") < 100, 1)
+                .when(F.col("reviews") < 1000, 2).when(F.col("reviews") < 10000, 3).otherwise(4))
+review_band = (F.when(review_rank == 0, "1-9").when(review_rank == 1, "10-99")
+                .when(review_rank == 2, "100-999").when(review_rank == 3, "1 000-9 999")
+                .otherwise("10 000+"))
+
+display(games.filter(F.col("reviews") > 0)
+    .withColumn("rank", review_rank).withColumn("reviews_band", review_band)
+    .groupBy("rank", "reviews_band").agg(
+        F.count("*").alias("games"),
+        F.round(F.percentile_approx("positive_ratio", 0.5), 3).alias("median_ratio"),
+        F.sum(ubisoft.cast("int")).alias("ubisoft_games"),
+        F.round(F.percentile_approx(F.when(ubisoft, F.col("positive_ratio")), 0.5), 3)
+         .alias("ubisoft_median"))
+    .orderBy("rank").drop("rank"))
+
+#%% md
+**Reference point — no Ubisoft title appears in the fifteen above, and once the comparison holds
+review volume constant its catalogue sits below the market in every band it occupies: 74.9%
+against 79.4% between 100 and 999 reviews, 78.8% against 85.5% between 1 000 and 9 999, 83.0%
+against 89.4% above 10 000.** The bar for the next game is not the top of the list — it is
+Ubisoft's own back catalogue, and that bar currently sits under the market's.
 #%% md
 ---
 # 4. Genres
@@ -662,7 +827,8 @@ by construction.
 
 #%% code
 # the raw comma-separated string is dropped: the exploded label replaces it
-genre_rows = games.drop("genre").select("*", F.explode("genres").alias("genre")).cache()
+genre_rows = materialise(games.drop("genre").select("*", F.explode("genres").alias("genre")),
+                         "steam_genre_rows")
 print(f"{genre_rows.count():,} (game, genre) rows for {games.count():,} games")
 
 #%% md
@@ -681,36 +847,51 @@ nor *Free to Play* (6%): they describe how a game is funded and sold, not what i
 those three, the shelf is **Action (43%), Casual (40%), Adventure (38%), Strategy (20%),
 Simulation (19%), RPG (17%)**, and everything else is under 5%.
 
+The field mixes more than that. Its 28 labels cover game genres, funding and release states
+(*Indie*, *Early Access*, *Free to Play*), content warnings (*Violent*, *Gore*, *Nudity*), eleven
+software categories (*Utilities*, *Photo Editing*, *Design & Illustration*, *Game Development*, …)
+and one stray *Movie*. The software rows are software: **Wallpaper Engine, Blender, Aseprite,
+Godot Engine and Source Filmmaker** are all in this catalogue because Steam types them as games,
+which the `type == 'game'` filter in 2.1 cannot separate. None of those labels reaches 700 games,
+but they are not removed either, so they appear in the tables below next to real genres.
+
 For Ubisoft the labels that matter are the six real ones. The rest of section 4 keeps all of
 them in the tables, because the contrast between *Indie* and the others is itself informative.
 
 ## 4.2 Which genres are liked
 
-Restricted to the 21 669 games with at least 50 reviews, so the ratio means something.
+Every genre carrying at least 100 games, with no review floor. A floor would lift each genre by
+about two points — better-reviewed games are better rated, as 3.6 shows — and drop seven of the
+twenty-two, including the lowest-rated one.
 
 *Chart: bar, `genre` x `median_positive_ratio`.*
 
 #%% code
-display(genre_rows.filter(F.col("reviews") >= 50).groupBy("genre")
+display(genre_rows.groupBy("genre")
         .agg(F.count("*").alias("games"),
              F.round(F.percentile_approx("positive_ratio", 0.5), 3).alias("median_positive_ratio"),
              F.round(F.sum("positive") / (F.sum("positive") + F.sum("negative")), 3).alias("pooled_ratio"))
         .filter(F.col("games") >= 100).orderBy(F.desc("median_positive_ratio")))
 
 #%% md
-The spread is narrow — **0.82 for Casual and Adventure down to 0.78 for Strategy** — with one
-exception. **Massively Multiplayer sits at 0.665**, fifteen points below everything else, and it
-is the genre where the median game is actively disliked. Live-service games are judged on
-servers, monetisation and updates long after launch, and this is what that judgement looks like
-in aggregate.
+Read on the nine labels that are actually game genres, eight fit inside five and a half points —
+**Casual 0.803, Adventure 0.797, Action 0.789, RPG 0.779, Strategy 0.769, Racing 0.754, Sports
+0.750, Simulation 0.748** — and the ninth is nowhere near them. **Massively Multiplayer sits at
+0.648**, ten points below the lowest of the eight and lowest on the pooled column too at 0.731 —
+the only row under it is *Violent*, a content warning rather than a genre. Live-service games are
+judged on servers, monetisation and updates long after launch, and this is what that judgement
+looks like in aggregate.
 
 The two columns disagree on purpose. The pooled ratio weights every review equally, so it
 measures *the average experience across the genre*; the median weights every game equally, so it
-measures *the typical game*. Indie is 0.813 typical and 0.886 pooled — its big titles are much
-better liked than its median one.
+measures *the typical game*. Indie is 0.800 typical and 0.885 pooled — its big titles are much
+better liked than its median one. The software labels stretch that to absurdity: Photo Editing
+reads 0.750 typical against 0.977 pooled, because Wallpaper Engine alone brings 572 127 reviews
+to a label of 105 rows.
 
-**Decision — avoid a live-service / MMO structure. The satisfaction penalty is the largest
-single effect in the genre data.**
+**Decision — avoid a live-service / MMO structure. The satisfaction penalty is the largest single
+effect in the genre data, and the only one attached to a design choice rather than to content or
+to a store category.**
 
 ## 4.3 Do publishers have favourite genres
 
@@ -736,7 +917,7 @@ Ubisoft's own Steam catalogue is the same shape, around a different centre:
 #%% code
 display(genre_rows.filter(F.col("publisher_clean").rlike("^Ubisoft"))
         .groupBy("genre").agg(F.count("*").alias("games"),
-                              F.round(F.sum("revenue_proxy") / 1e6).alias("revenue_proxy_musd"))
+                              F.round(F.sum("owners_x_price") / 1e6).alias("owners_x_price_musd"))
         .orderBy(F.desc("games")).limit(8))
 
 #%% md
@@ -745,44 +926,81 @@ is, it will be read by players against that catalogue.
 
 ## 4.4 Which genres are worth entering
 
-The revenue proxy is `owners x list price`. Summed by genre it gives each genre's share of the
-market's value, which can be set against its share of releases:
+`owners_x_price` averaged over each genre, in millions (2.9 defines it). For one game it is every
+copy anyone owns, priced at the store's list price and added up; the column averages that over
+the genre's games. **It is a total accumulated since release — not a price, and not a yearly
+figure.** `mean_price_usd` sits next to it for exactly that reason: what one copy costs, in the
+same table as what all the copies add up to. `pct_free` says how much of the genre the proxy
+scores at zero.
 
-**opportunity = share of proxy revenue / share of releases.** Above 1, the genre returns more
-value than the shelf space it takes.
-
-*Chart: scatter, `share_of_releases` x `share_of_revenue`, size `games`, label `genre`.*
+*Chart: bar, `genre` x `stock_value_musd`.*
 
 #%% code
-total_games = games.count()
-total_revenue = games.agg(F.sum("revenue_proxy")).collect()[0][0]
-
-genre_economics = (genre_rows.groupBy("genre")
-    .agg(F.count("*").alias("games"),
-         F.sum("revenue_proxy").alias("revenue"),
-         F.round(F.avg("revenue_proxy")).alias("mean_revenue_per_game"),
-         F.round(100 * F.avg((F.col("owners_min") >= 100000).cast("int")), 1).alias("breakout_pct"),
-         F.round(100 * F.avg(F.col("is_free").cast("int")), 1).alias("pct_free"))
-    .filter(F.col("games") >= 150)
-    .withColumn("share_of_releases", F.round(100 * F.col("games") / total_games, 1))
-    .withColumn("share_of_revenue", F.round(100 * F.col("revenue") / total_revenue, 1))
-    .withColumn("opportunity", F.round((F.col("revenue") / total_revenue) / (F.col("games") / total_games), 2)))
-
-display(genre_economics.drop("revenue").orderBy(F.desc("opportunity")))
+display(genre_rows.groupBy("genre")
+        .agg(F.count("*").alias("games"),
+             F.round(F.avg("owners_x_price") / 1e6, 2).alias("stock_value_musd"),
+             F.round(F.avg("initial_price_usd"), 2).alias("mean_price_usd"),
+             F.round(100 * F.avg(F.col("is_free").cast("int")), 1).alias("pct_free"))
+        .filter(F.col("games") >= 150)
+        .orderBy(F.desc("stock_value_musd")))
 
 #%% md
-Three genres return more than they take — **Massively Multiplayer at 2.96, RPG at 1.81, Action
-at 1.52** — and two are badly crowded: **Casual takes 40% of the shelf for 8.7% of the value
-(0.22), Indie 71% for 35% (0.49)**. Strategy, Adventure and Simulation sit at parity.
+**Massively Multiplayer leads at 5.14 M$ a game, ahead of RPG at 3.14 M$ and Action at
+2.63 M$**, while the two largest shelves in the catalogue carry the least: **Indie 0.86 M$ over
+39 681 games, Casual 0.38 M$ over 22 086**.
 
-Two readings to be careful with. **Free to Play scores 0.02 not because free games make no money
-but because the proxy cannot see any revenue that is not a store price** — an in-game economy is
-invisible here. The same blindness deflates Massively Multiplayer, 53% of which is free, and it
-still comes out on top; its true opportunity is higher than 2.96, not lower. And the whole column
-inherits the proxy's biases, so it ranks genres, it does not value them.
+`mean_price_usd` says where that spread does *not* come from. Across the nine real genres the
+average price varies by a factor of **1.8**, from $5.20 for MMO to $9.38 for Simulation, while
+the stock value varies by a factor of **13**, from Casual's 0.38 M$ to MMO's 5.14 M$. Choosing a
+genre barely moves the price a studio can ask; it moves how many people end up owning the game. The software labels invert the pair: **the six
+highest prices in the table are all software, $19.11 to $21.36, and not one of them reaches
+0.85 M$**. That is what a niche tool at a high price looks like.
 
-Set against 4.2, that gives one clean answer: **MMO buys the best economics and the worst
-satisfaction. RPG is second on economics with no such penalty.**
+`pct_free` marks the distortion in the other direction. **Free to Play averages 0.03 M$ a game
+not because free games make no money but because a list price of zero times any number of owners
+is zero** — an in-game economy is invisible here. The same blindness cuts into Massively
+Multiplayer, 53% of which is free.
+
+Which is where `mean_price_usd` has to be read a second time, because it averages those zeros
+too. For a genre that is half free it reports a share of free games dressed up as a price. The
+same three measures on paid games only, where every row has a price a studio could actually set:
+
+*Chart: bar, `genre` x `mean_owners_paid`.*
+
+#%% code
+display(genre_rows.filter(~F.col("is_free")).groupBy("genre")
+        .agg(F.count("*").alias("paid_games"),
+             F.round(F.avg("initial_price_usd"), 2).alias("mean_price_paid"),
+             F.round(F.avg("owners_x_price") / 1e6, 2).alias("stock_value_paid_musd"),
+             F.round(F.avg("owners_mid")).alias("mean_owners_paid"))
+        .filter(F.col("paid_games") >= 100)
+        .orderBy(F.desc("stock_value_paid_musd")))
+
+#%% md
+**MMO's $5.20 was not a low price, it was a high share of free games** — and the two columns are
+related by an identity rather than a tendency: `mean_price_usd` is exactly
+`(1 - pct_free) x mean_price_paid`, on every row of the table above to within rounding. It is a
+price multiplied by a participation rate, which is why it cannot be read as a price. On its paid
+half MMO charges **$11.08, the most of any real genre and 2.1 times what the published column
+reports**, and its stock value *rises* to 10.93 M$ instead of falling: the zeros were holding it
+down, not propping it up.
+
+The damage is specific, and worth knowing because the rest of section 4 keeps reading that
+column. The eight other real genres are **84.5% to 88.7% paid**, so the identity shaves each of
+them by about the same eighth and leaves their order untouched — drop MMO and the price spread is
+1.62 published against 1.66 paid. **MMO is the one row where half the genre is missing from its
+own average**, which is exactly what made it look cheap. Across all nine the spread is **1.7** on
+paid games, MMO at the top of it rather than the bottom, while the value spread widens from 13
+to **25**.
+
+So the value does come from reach, and here it can be shown rather than inferred: **a paid MMO
+averages 381 000 owners against 160 000 for a paid RPG and 143 000 for a paid Action** — two and
+a half times the audience, at the same price. What a premium single-player release cannot copy is
+that audience and the in-game economy behind it, not a pricing trick.
+
+Set against 4.2, where MMO is last on satisfaction, that leaves **RPG and Action: second and
+third on stock value, at ordinary prices, with no satisfaction penalty.**
+
 
 ## 4.5 Is any genre emerging
 
@@ -812,24 +1030,66 @@ it needs to be good in a category that already pays.
 
 ## 4.6 The slot
 
-Putting 4.2 and 4.4 together with the price band from 3.3 — games released from 2018, priced
-$20-40:
+Every genre comparison so far ran on the whole catalogue, where a genre's numbers move with what
+it charges and how much of it is free — which is exactly what 4.4 had to unpick for MMO. This one
+holds both fixed: released from 2018, priced $20-40, the band 3.3 settled on. What is left is
+reach and satisfaction, compared on equal commercial ground.
+
+Three of the nine real genres fall below the 150-game floor here — MMO, Racing, Sports — so the
+case against live service stays where it was made, in 4.2 and 4.4. Indie and Early Access are in
+the table for contrast rather than as candidates, and `is_genre` marks which rows are which.
 
 *Chart: combo — bars `games`, line `breakout_pct`, on `genre`.*
 
 #%% code
+# the band is 3.3's, expressed the same way: [20, 40)
+REAL_GENRES = ["Action", "Adventure", "Casual", "RPG", "Strategy",
+               "Simulation", "Racing", "Sports", "Massively Multiplayer"]
+
 display(outcome(genre_rows.filter((F.col("release_year") >= 2018)
-                                  & F.col("price_usd").between(20, 40)), "genre")
-        .filter(F.col("games") >= 150).orderBy(F.desc("breakout_pct")))
+                                  & (F.col("price_usd") >= 20) & (F.col("price_usd") < 40)), "genre")
+        .filter(F.col("games") >= 150)
+        .withColumn("is_genre", F.col("genre").isin(REAL_GENRES))
+        .orderBy(F.desc("breakout_pct")))
 
 #%% md
-In the band Ubisoft would actually price into, **Action reaches a 34.9% breakout rate over 776
-games and RPG 33.8% over 471**, against 27.8% for Adventure. Adventure trades six points of
-breakout for the best satisfaction of the three (0.790). Action and RPG overlap heavily — most of these games carry both labels —
-which is the combination the recommendation lands on.
+In the band Ubisoft would actually price into, **Action and RPG take the top two places, 34.9%
+and 33.8% breakout**, ahead of Strategy at 31.2% and Adventure at 27.8%. The same pair leads
+4.4's stock value, on a different measure over a different population. That agreement is the
+finding.
 
-**Decision — genre: Action-RPG, single-player, premium. Not Casual, not Indie-positioned, not
-live service.**
+Their order is not. 34.9% on 776 games and 33.8% on 471 carry standard errors of 1.7 and 2.2
+points, so the 1.1-point gap sits well inside them, and Strategy is not separable from RPG
+either. **The top three are a plateau, not a ranking.** What does separate is the bottom:
+Adventure and Indie are three standard errors under Action, and Casual at 15.2% is in another
+regime entirely.
+
+Adventure trades seven points of breakout for the best satisfaction of the three (0.790). Indie's
+28.0% is a different animal: 865 of the catalogue's 39 681 Indie rows survive this filter, so the
+number does not describe the shelf 4.4 measured at 0.86 M$.
+
+A plateau is an argument for taking both labels rather than choosing between them — provided they
+are one position and not two:
+
+#%% code
+slot = games.filter((F.col("release_year") >= 2018)
+                    & (F.col("price_usd") >= 20) & (F.col("price_usd") < 40))
+a, r = F.array_contains("genres", "Action"), F.array_contains("genres", "RPG")
+
+display(slot.select(
+    F.sum(a.cast("int")).alias("action"),
+    F.sum(r.cast("int")).alias("rpg"),
+    F.sum((a & r).cast("int")).alias("both"),
+    F.round(100 * F.sum((a & r).cast("int")) / F.sum(r.cast("int")), 1).alias("pct_of_rpg_also_action")))
+
+#%% md
+**228 of the band's 471 RPGs also carry Action** — just under half, on the smaller of the two
+labels. The rows are not independent samples, and the intersection is a real, populated position
+in the catalogue rather than a compromise between two separate genres.
+
+**Decision — genre: Action-RPG, single-player, premium.** Not Casual (15.2%, here). Not live
+service (0.648 satisfaction in 4.2, an audience 4.4 shows a premium release cannot buy). Not
+Indie-positioned — a funding label rather than a genre (4.1), and not a claim Ubisoft can make.
 #%% md
 ---
 # 5. Platforms
@@ -890,9 +1150,11 @@ Two checks. First, hold the price band and the release era fixed:
 
 #%% code
 display(outcome(games.filter(F.col("release_year") >= 2018)
+                     .withColumn("rank", band_rank)
                      .withColumn("band", price_band)
                      .withColumn("ported", F.col("n_platforms") > 1),
-                "band", "ported").orderBy("band", "ported"))
+                "rank", "band", "ported")
+        .orderBy("rank", "ported").drop("rank"))
 
 #%% md
 The gap survives in five of the six bands: at $10-20, 87 median reviews ported against 38; at
@@ -930,11 +1192,11 @@ Six decisions, each from the section that produced it.
 
 | | decision | evidence |
 |---|---|---|
-| **Genre** | Action-RPG, single-player, premium | Action 1.52 and RPG 1.81 on revenue-to-releases; 34.9% and 33.8% breakout in the $20-40 band (4.4, 4.6) |
-| **Not** | live service or MMO | MMO carries the best economics *and* a 0.665 median positive ratio, fifteen points below every other genre (4.2) |
-| **Price** | $29.99 - $39.99 | the $20-40 band returns 378 median reviews and a 31.9% breakout rate; above $40 the market thins to 567 games (3.3) |
+| **Genre** | Action-RPG, single-player, premium | Action and RPG carry 2.63 M$ and 3.14 M$ of stock value a game at ordinary prices, $7.98 and $9.36; 34.9% and 33.8% breakout in the $20-40 band (4.4, 4.6) |
+| **Not** | live service or MMO | MMO leads on stock value by audience, not by price: a paid MMO averages 381 000 owners against 160 000 for a paid RPG at the same $11 — an audience, and an in-game economy this dataset cannot see, that a premium release cannot buy. And it carries a 0.648 median positive ratio, ten points below the lowest of the eight other real genres (4.2, 4.4) |
+| **Price** | $29.99 or $39.99 | on near-identical samples, $29.99 returns 496 median reviews and a 36.0% breakout rate against $24.99's 170 and 24.9%; $34.99 sits below both (3.3) |
 | **Platforms** | Windows at launch, Mac and Linux planned in | Windows is 99.97% of the catalogue; ported games lead inside every price band, and porting is not a big-studio behaviour (5.1, 5.3) |
-| **Languages** | twelve: EN, DE, FR, RU, zh-Hans, ES, JA, IT, KO, pt-BR, PL, zh-Hant | success climbs to the 15-20 band, 39% breakout, then collapses into shovelware above 21 (3.4) |
+| **Languages** | thirteen: EN, DE, FR, ES, RU, IT, zh-Hans, JA, pt-BR, PL, KO, zh-Hant, TR | every language added pays up to the thirteenth — 696 median reviews and a 43.2% breakout rate — and the fourteenth reverses it (3.4) |
 | **Window** | February to May | November and December take the most releases and return the least: 19 median reviews and 7.5% breakout, against 26-27 and 9-10% in spring (3.2) |
 | **Rating** | mature is not a constraint | 12.8% of the catalogue is mature-tagged and outperforms the rest; Steam's own age field is empty for 98.8% of games (3.5) |
 
@@ -942,7 +1204,7 @@ Two things this study says about the field the game will land in, beyond the pro
 
 - **The competitor set is about thirty publishers, not fifty thousand.** 41% of Steam's catalogue
   comes from publishers with a single release, and the twenty largest account for 5% of it.
-  Ubisoft's rivals are the names in 3.1's revenue table.
+  Ubisoft's rivals are the names in 3.1's `owners_x_price` table.
 - **There is no wave to catch.** The genre mix moved by less than two points in five years. The
   concept has to win on execution inside a category that already pays, not on timing.
 
@@ -956,10 +1218,10 @@ at scale is exceptional** — Portal 2 territory.
 after that date exists — no Steam Deck effect, no post-2022 pricing.
 
 **There are no sales.** `owners` is SteamSpy's *estimate*, published as a bracket, and 68% of the
-catalogue falls in the bottom one. The revenue proxy multiplies that bracket's midpoint by the
+catalogue falls in the bottom one. `owners_x_price` multiplies that bracket's midpoint by the
 list price, so it ignores Steam's 30% cut, regional pricing, discounts, refunds, bundles, free
 keys — and it values every free-to-play game at zero, which is why section 4.4 reads *Free to
-Play: 0.02* for a business model that funds some of the largest games in the table.
+Play: 0.03 M$ a game* for a business model that funds some of the largest games in the table.
 
 **Reviews are not players.** They correlate with owners at 0.76 on the log scale, which is enough
 to rank and not enough to size.

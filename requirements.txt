@@ -4,7 +4,7 @@
 #   python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 # A JDK 17 must be on PATH or in JAVA_HOME — Spark needs it.
 
-pyspark==3.5.3              # same DataFrame API as Databricks Runtime 15/16
+pyspark==3.5.3              # Databricks serverless is Spark 4.2; the API used here is identical
 pandas==3.0.5               # local display() shim: Spark DataFrame -> rendered table
 pyarrow==25.0.1             # toPandas() transfer
 setuptools==84.0.0          # pyspark 3.5 still imports distutils, gone from Python 3.12

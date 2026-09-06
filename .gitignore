@@ -5,3 +5,5 @@ __pycache__/
 build/__pycache__/
 data/steam_game_output.json
 jedha_steam___instructions.txt
+data/steam.ndjson
+data/sample_pretty.json

@@ -10,11 +10,39 @@
 # MAGIC
 # MAGIC Ubisoft wants to launch a new game and asked for a global reading of the Steam marketplace
 # MAGIC before the concept is locked. The brief lists a dozen questions on three levels — the market as
-# MAGIC a whole, genres, and platforms. This notebook answers them in that order, and each level closes
-# MAGIC on the one thing it changes in the product brief: **genre, price, platforms, languages, release
-# MAGIC window, age rating.**
+# MAGIC a whole, genres, and platforms. This notebook takes the three levels in that order, and each one
+# MAGIC closes on the one thing it changes in the product brief: **genre, price, platforms, languages,
+# MAGIC release window, age rating.**
 # MAGIC
 # MAGIC Section 6 collects those six decisions. Section 7 says what this dataset cannot decide.
+# MAGIC
+# MAGIC ## Where each question is answered
+# MAGIC
+# MAGIC | # | The brief asks | Answered in |
+# MAGIC |---|---|---|
+# MAGIC | | ***Macro*** | |
+# MAGIC | 1 | Which publisher has released the most games on Steam? | 3.1 |
+# MAGIC | 2 | What are the best rated games? | **3.6** |
+# MAGIC | 3 | Are there years with more releases? More or fewer during Covid? | 3.2 |
+# MAGIC | 4 | How are the prices distributed? Are there many games with a discount? | 3.3 |
+# MAGIC | 5 | What are the most represented languages? | 3.4 |
+# MAGIC | 6 | Are there many games prohibited for children under 16/18? | 3.5 |
+# MAGIC | | ***Genres*** | |
+# MAGIC | 7 | What are the most represented genres? | 4.1 |
+# MAGIC | 8 | Are there any genres with a better positive/negative review ratio? | 4.2 |
+# MAGIC | 9 | Do some publishers have favourite genres? | 4.3 |
+# MAGIC | 10 | What are the most lucrative genres? | 4.4 |
+# MAGIC | | ***Platforms*** | |
+# MAGIC | 11 | Are most games available on Windows/Mac/Linux? | 5.1 |
+# MAGIC | 12 | Do certain genres tend to be available on certain platforms? | 5.2 |
+# MAGIC
+# MAGIC Question 2 closes the macro level instead of coming second: 3.2 to 3.5 each end on a product
+# MAGIC decision, while the best-rated list produces a benchmark to hit rather than a choice to make.
+# MAGIC
+# MAGIC Four sections go beyond the list, because the brief's stated goal — *what factors affect the
+# MAGIC popularity or sales of a video game* — needs them. **2.11** defines what success means in a
+# MAGIC dataset that holds no sales figure, **4.5** tests whether any genre is actually emerging, **4.6**
+# MAGIC locates the genre-and-price slot, and **5.3** asks whether porting pays once price is held equal.
 # MAGIC
 # MAGIC ## The data
 # MAGIC
@@ -35,6 +63,10 @@
 # MAGIC The notebook is written for **Databricks**, and falls back to a local Spark session so the code
 # MAGIC can be re-run outside a workspace. Everything below this cell is identical in both cases,
 # MAGIC including the `display()` calls that drive Databricks' visualisation tool.
+# MAGIC
+# MAGIC Two things differ per environment and are hidden behind the same names: `display()`, and
+# MAGIC `materialise()` — serverless compute has no `cache()`, so a frame that many later cells re-read
+# MAGIC is written to a Delta table there, and simply cached locally.
 
 # COMMAND ----------
 
@@ -51,6 +83,13 @@ if IS_DATABRICKS:
     if not os.path.exists(DATA_PATH):
         import urllib.request
         urllib.request.urlretrieve(SOURCE_URL, DATA_PATH)
+
+    def materialise(df, name):
+        # No cache() on serverless. A Delta table costs one write and turns the
+        # non-splittable JSON into columnar storage for every read that follows.
+        table = f"workspace.default.{name}"
+        df.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(table)
+        return spark.table(table)
 else:
     # Local run: build the session by hand and emulate Databricks' display().
     from pyspark.sql import SparkSession, DataFrame
@@ -67,6 +106,9 @@ else:
 
     def display(x, n=1000):
         _ipython_display(x.limit(n).toPandas() if isinstance(x, DataFrame) else x)
+
+    def materialise(df, name):
+        return df.cache()
 
     DATA_PATH = "data/steam_game_output.json"
 
@@ -268,10 +310,12 @@ display(games.filter(F.col("languages").contains("(")).select("name", "languages
 # MAGIC ### 2.5 Publisher names
 # MAGIC
 # MAGIC Ubisoft appears under five spellings, two of which differ only by a trademark sign or four
-# MAGIC trailing tabs. Trimming whitespace and stripping `®`/`™` rewrites 271 rows; it does **not**
-# MAGIC merge `Ubisoft` with `Ubisoft Entertainment`, and it should not — deciding that two different
-# MAGIC company names are the same firm is a judgement call, not a cleaning rule. The publisher counts in
-# MAGIC section 3.1 are therefore a floor, not an exact figure.
+# MAGIC trailing tabs. Trimming whitespace and stripping `®`/`™` rewrites 271 rows and empties 134
+# MAGIC more that held nothing but whitespace — 405 changes in all. The report in 2.10 therefore
+# MAGIC compares with `eqNullSafe` and not `!=`, or SQL's `NULL != 'x' -> NULL` would silently drop
+# MAGIC those 134. It does **not** merge `Ubisoft` with `Ubisoft Entertainment`, and it should not —
+# MAGIC deciding that two different company names are the same firm is a judgement call, not a cleaning
+# MAGIC rule. The publisher counts in section 3.1 are therefore a floor, not an exact figure.
 # MAGIC
 # MAGIC The field also holds co-publisher lists (`Team17, NEXT Studios`), but 3 215 rows contain a comma
 # MAGIC and most of them are `Ltd.`-style suffixes, so splitting on it would create more noise than it
@@ -283,9 +327,7 @@ def normalise_name(column):
     cleaned = F.trim(F.regexp_replace(F.regexp_replace(F.col(column), r"[®™]", ""), r"\s+", " "))
     return F.when(cleaned != "", cleaned)
 
-games = (games
-    .withColumn("publisher_clean", normalise_name("publisher"))
-    .withColumn("developer_clean", normalise_name("developer")))
+games = games.withColumn("publisher_clean", normalise_name("publisher"))
 
 print("distinct publisher strings:", games.select("publisher").distinct().count(),
       "-> after normalisation:", games.select("publisher_clean").distinct().count())
@@ -364,11 +406,14 @@ display(games.filter(F.col("positive_ratio") == 1)
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ### 2.9 Platforms, and a revenue proxy
+# MAGIC ### 2.9 Platforms, and a value proxy
 # MAGIC
-# MAGIC The `platforms` struct becomes three flags and a count. Revenue is not in the dataset; the
-# MAGIC closest available stand-in is **owners x list price**, which section 4.4 uses and section 7
-# MAGIC takes apart.
+# MAGIC The `platforms` struct becomes three flags and a count. Revenue is not in the dataset, and
+# MAGIC nothing here stands in for it: `owners` counts copies *held*, not copies bought — bundles, gift
+# MAGIC keys and free weekends all land in it — and `initialprice` is the list price, not a price anyone
+# MAGIC paid. Their product is named for what it is, **`owners_x_price`: the list-price value of every
+# MAGIC copy in circulation**. The rankings in sections 3 and 4 use it as a sort key; section 7 takes it
+# MAGIC apart.
 
 # COMMAND ----------
 
@@ -379,9 +424,9 @@ games = (games
     .withColumn("n_platforms", F.col("platforms.windows").cast("int")
                              + F.col("platforms.mac").cast("int")
                              + F.col("platforms.linux").cast("int"))
-    .withColumn("revenue_proxy", F.col("owners_mid") * F.col("initial_price_usd")))
+    .withColumn("owners_x_price", F.col("owners_mid") * F.col("initial_price_usd")))
 
-games = games.cache()
+games = materialise(games, "steam_games")
 print(f"{games.count():,} games ready, {len(games.columns)} columns")
 
 # COMMAND ----------
@@ -392,16 +437,27 @@ print(f"{games.count():,} games ready, {len(games.columns)} columns")
 # COMMAND ----------
 
 report = spark.createDataFrame([
-    ("2.1  drop type != 'game'",            games.count(),  raw.count() - games.count()),
-    ("2.2  price strings -> USD",           games.count(),  games.filter(F.col("discount_pct") > 0).count()),
-    ("2.3  release_date -> date",           games.count(),  games.filter(F.col("release_date_parsed").isNull()).count()),
-    ("2.4  genre -> array",                 games.count(),  games.filter(F.col("n_genres") == 0).count()),
-    ("2.4  languages -> array",             games.count(),  games.filter(F.col("n_languages") == 0).count()),
-    ("2.5  publisher name normalised",      games.count(),  games.filter(F.col("publisher") != F.col("publisher_clean")).count()),
-    ("2.6  owners bracket -> bounds",       games.count(),  games.filter(F.col("owners_min").isNull()).count()),
-    ("2.7  required_age -> 0-21 or NULL",   games.count(),  games.filter(F.col("age_rating").isNull()).count()),
-    ("2.8  reviews -> Wilson score",        games.count(),  games.filter(F.col("wilson_score").isNull()).count()),
-], ["rule", "rows_in", "rows_affected_or_null"])
+    ("2.1   drop type != 'game'",           games.count(), "rows dropped",
+     raw.count() - games.count()),
+    ("2.2   price strings -> USD",          games.count(), "non-numeric source",
+     games.filter(~F.col("price").rlike(r"^-?\d+$")
+                | ~F.col("initialprice").rlike(r"^-?\d+$")
+                | ~F.col("discount").rlike(r"^-?\d+$")).count()),
+    ("2.3   release_date -> date",          games.count(), "source empty -> NULL",
+     games.filter(F.col("release_date_parsed").isNull()).count()),
+    ("2.4a  genre -> array",                games.count(), "source empty -> []",
+     games.filter(F.col("n_genres") == 0).count()),
+    ("2.4b  languages -> array",            games.count(), "source empty -> []",
+     games.filter(F.col("n_languages") == 0).count()),
+    ("2.5   publisher name normalised",     games.count(), "values rewritten",
+     games.filter(~F.col("publisher").eqNullSafe(F.col("publisher_clean"))).count()),
+    ("2.6   owners bracket -> bounds",      games.count(), "unparsed -> NULL",
+     games.filter(F.col("owners_min").isNull()).count()),
+    ("2.7   required_age -> 0-21 or NULL",  games.count(), "out of range -> NULL",
+     games.filter(F.col("age_rating").isNull()).count()),
+    ("2.8   reviews -> Wilson score",       games.count(), "no reviews -> NULL",
+     games.filter(F.col("wilson_score").isNull()).count()),
+], ["rule", "rows_in", "measured", "n"])
 
 display(report)
 
@@ -447,10 +503,15 @@ def outcome(df, *group_by):
 
 by_publisher = (games.groupBy("publisher_clean")
     .agg(F.count("*").alias("games"),
-         F.round(F.sum("revenue_proxy") / 1e6).alias("revenue_proxy_musd"))
+         F.round(F.sum("owners_x_price") / 1e6).alias("owners_x_price_musd"))
     .filter(F.col("publisher_clean").isNotNull()))
 
 display(by_publisher.orderBy(F.desc("games")).limit(20))
+
+display(games.select(
+    F.countDistinct("publisher_clean").alias("named_publishers"),
+    F.count("*").alias("games"),
+    F.sum(F.col("publisher_clean").isNull().cast("int")).alias("no_publisher")))
 
 # COMMAND ----------
 
@@ -459,20 +520,28 @@ display(by_publisher.orderBy(F.desc("games")).limit(20))
 # MAGIC 8floor (202) and SEGA (165). Ubisoft is tenth with 128.
 # MAGIC
 # MAGIC That ranking says less than the shape behind it. Steam has **29 824 named publishers for
-# MAGIC 55 690 games** (134 of which carry no publisher and sit outside every table here), and the
-# MAGIC concentration is the finding:
+# MAGIC 55 690 games** (134 of which carry no publisher, and so appear in none of the rankings above),
+# MAGIC and the concentration is the finding:
 
 # COMMAND ----------
 
-concentration = (by_publisher
+buckets = (by_publisher
     .withColumn("size", F.when(F.col("games") == 1, "1 game")
                          .when(F.col("games") <= 5, "2-5 games")
                          .when(F.col("games") <= 20, "6-20 games")
                          .otherwise("21+ games"))
-    .groupBy("size").agg(F.count("*").alias("publishers"), F.sum("games").alias("games"))
+    .groupBy("size").agg(F.count("*").alias("publishers"), F.sum("games").alias("games")))
+
+# by_publisher drops the games with no publisher, so the buckets cover 55 556 of the 55 690.
+# The residual row keeps the numerator on the same population as the denominator below.
+orphans = (games.filter(F.col("publisher_clean").isNull())
+    .groupBy(F.lit("no publisher").alias("size"))
+    .agg(F.lit(0).cast("long").alias("publishers"), F.count("*").alias("games")))
+
+concentration = (buckets.unionByName(orphans)
     .withColumn("pct_of_catalogue", F.round(100 * F.col("games") / games.count(), 1)))
 
-display(concentration.orderBy("publishers"))
+display(concentration.orderBy(F.col("size") == "no publisher", "publishers"))
 
 # COMMAND ----------
 
@@ -481,23 +550,35 @@ display(concentration.orderBy("publishers"))
 # MAGIC twenty largest publishers together account for 5% of releases. Steam is not a market of a few
 # MAGIC big houses — it is a very long tail with a handful of large firms on the end of it.
 # MAGIC
-# MAGIC Rank the same publishers by the revenue proxy instead of by volume and a different set of names
-# MAGIC appears, Ubisoft first among them.
+# MAGIC Rank the same publishers by `owners_x_price` instead of by volume and a different set of names
+# MAGIC appears. The table below drops the one-game publishers — 23 018 of the 29 824, and the only
+# MAGIC group whose total is a single title by construction. Above that the concentration falls off
+# MAGIC smoothly rather than at a threshold, so `value_per_game_musd` is read next to `games`: on three
+# MAGIC or four releases it is still close to one title's figure.
 # MAGIC
-# MAGIC *Chart: bar, `publisher_clean` x `revenue_proxy_musd`.*
+# MAGIC *Chart: bar, `publisher_clean` x `owners_x_price_musd`.*
 
 # COMMAND ----------
 
-display(by_publisher.filter(F.col("games") >= 5)
-                    .withColumn("revenue_per_game_musd", F.round(F.col("revenue_proxy_musd") / F.col("games"), 1))
-                    .orderBy(F.desc("revenue_proxy_musd")).limit(20))
+display(by_publisher.filter(F.col("games") >= 2)
+                    .withColumn("value_per_game_musd", F.round(F.col("owners_x_price_musd") / F.col("games"), 1))
+                    .orderBy(F.desc("owners_x_price_musd")).limit(20))
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC Volume and revenue are close to unrelated: Big Fish Games' 423 releases are worth less than
-# MAGIC CD PROJEKT RED's 7. **For Ubisoft the competitor set is not "everyone on Steam"** — it is the
-# MAGIC thirty-odd publishers in this table.
+# MAGIC Volume and value are close to unrelated. **Big Fish Games leads on releases with 423 and comes
+# MAGIC 177th of the 6 806 publishers with more than one game once the same list is ranked by
+# MAGIC `owners_x_price`.** **For Ubisoft the competitor set is not "everyone on Steam"** — it is the thirty-odd
+# MAGIC publishers in this table.
+# MAGIC
+# MAGIC One caveat on the order. `publisher` is free text, so this ranks spellings, not firms. Across the
+# MAGIC catalogue 175 names appear under 355 different spellings (6.0% of the proxy), and 2 060 strings
+# MAGIC credit several parties at once (16.7%) — 959 of those name a partner that also publishes under
+# MAGIC its own name, which detaches 12.4% of the proxy from firms already present in the ranking. A firm
+# MAGIC that co-publishes and ships Mac and Linux ports is split across many rows; one that always writes
+# MAGIC its name the same way is not. The order rewards naming consistency as much as size, so what this
+# MAGIC table identifies is the set of names, not their sequence.
 # MAGIC
 # MAGIC ## 3.2 The release calendar
 # MAGIC
@@ -574,14 +655,24 @@ display(games.groupBy("price_usd").agg(F.count("*").alias("games")).orderBy(F.de
 
 # COMMAND ----------
 
-price_band = (F.when(F.col("is_free"), "0 free")
-               .when(F.col("price_usd") < 5, "1 under $5")
-               .when(F.col("price_usd") < 10, "2 $5-10")
-               .when(F.col("price_usd") < 20, "3 $10-20")
-               .when(F.col("price_usd") < 40, "4 $20-40")
-               .otherwise("5 $40+"))
+# band_rank carries the ordering, so the labels can read as prices and nothing else
+band_rank = (F.when(F.col("is_free"), 0)
+              .when(F.col("price_usd") < 5, 1)
+              .when(F.col("price_usd") < 10, 2)
+              .when(F.col("price_usd") < 20, 3)
+              .when(F.col("price_usd") < 40, 4)
+              .otherwise(5))
 
-display(outcome(games.withColumn("band", price_band), "band").orderBy("band"))
+price_band = (F.when(band_rank == 0, "free")
+               .when(band_rank == 1, "under $5")
+               .when(band_rank == 2, "$5-10")
+               .when(band_rank == 3, "$10-20")
+               .when(band_rank == 4, "$20-40")
+               .otherwise("$40+"))
+
+display(outcome(games.withColumn("rank", band_rank).withColumn("band", price_band),
+                "rank", "band")
+        .orderBy("rank").drop("rank"))
 
 # COMMAND ----------
 
@@ -595,7 +686,25 @@ display(outcome(games.withColumn("band", price_band), "band").orderBy("band"))
 # MAGIC that the $20-40 band is **where games of Ubisoft's scale actually live**, and that pricing a
 # MAGIC premium title below $20 puts it among games that are not competing for the same attention.
 # MAGIC
-# MAGIC **Decision — price: $29.99 to $39.99.**
+# MAGIC That band is not a continuum. Four price points hold 2 310 of its 2 394 games:
+
+# COMMAND ----------
+
+display(outcome(games.filter((F.col("price_usd") >= 20) & (F.col("price_usd") < 40)), "price_usd")
+        .filter(F.col("games") >= 50).orderBy("price_usd"))
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC **$24.99 and $29.99 carry almost the same number of games — 862 and 865 — and not the same
+# MAGIC outcome: 170 median reviews against 496, a 24.9% breakout rate against 36.0%.** Five dollars
+# MAGIC apart, on samples that size, that is the cleanest comparison in this section. And $34.99 breaks
+# MAGIC the ladder rather than continuing it: 155 games, 27.1%, below $29.99. What the band rewards is
+# MAGIC not a higher number, it is landing on one of the two anchors the market reads as premium.
+# MAGIC
+# MAGIC **Decision — price: $29.99 or $39.99.** Which of the two is a budget question, not a market one:
+# MAGIC $39.99 does better on both measures — 730 median reviews, 39.5% — because that is where AAA
+# MAGIC productions sit, and it is their scale doing the work, not their label.
 
 # COMMAND ----------
 
@@ -621,7 +730,10 @@ display(games.filter(F.col("discount_pct") > 0).select(
 
 by_language = (games.select(F.explode("languages_list").alias("language"))
                     .groupBy("language").agg(F.count("*").alias("games")))
-display(by_language.orderBy(F.desc("games")).limit(20))
+
+display(by_language
+    .withColumn("pct_of_games", F.round(100 * F.col("games") / games.count(), 1))
+    .orderBy(F.desc("games")).limit(20))
 
 # COMMAND ----------
 
@@ -648,29 +760,60 @@ display(outcome(games.withColumn("languages", language_band), "languages")
 
 # MAGIC %md
 # MAGIC Localisation tracks success up to about twenty languages — 16 median reviews and a 7% breakout
-# MAGIC rate for English-only, **360 reviews and 39% at 15-20 languages** — and then collapses at 21+.
+# MAGIC rate at a single language, **360 reviews and 39% at 15-20 languages** — and then collapses at 21+.
 # MAGIC
-# MAGIC That collapse is not a finding, it is a cluster of shovelware. The 1 265 games listing 21 or more
-# MAGIC languages are dominated by a handful of publishers pushing dozens of near-identical $0.99 titles,
-# MAGIC each shipped with every language Steam offers:
+# MAGIC That collapse mixes two things: how many languages a game ships, and what it costs — price being
+# MAGIC the strongest predictor in this section. Holding the price band fixed separates them, the way 5.3
+# MAGIC does for ports:
 
 # COMMAND ----------
 
-display(games.filter(F.col("n_languages") >= 21)
-             .groupBy("publisher_clean")
-             .agg(F.count("*").alias("games"),
-                  F.round(F.avg("price_usd"), 2).alias("mean_price"),
-                  F.percentile_approx("reviews", 0.5).alias("median_reviews"))
-             .orderBy(F.desc("games")).limit(10))
+display(outcome(games.filter((F.col("price_usd") >= 10) & (F.col("price_usd") < 20))
+                     .withColumn("languages", language_band), "languages")
+        .orderBy(F.desc("median_reviews")))
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC Adding a language string costs nothing and proves nothing. The band that means something is
-# MAGIC 10-20, where the localisation is real work.
+# MAGIC The collapse survives the control. Among games priced $10-20, **21 languages or more returns 60
+# MAGIC median reviews and a 26.3% breakout rate, against 816 and 42.3% at 15-20 languages** and 703 and
+# MAGIC 38.8% at 10-14 — it lands just above the 2-4 band. Adding a language string costs nothing and
+# MAGIC proves nothing. The band that means something is 10-20, where the localisation is real work.
 # MAGIC
-# MAGIC **Decision — languages: twelve — EN, DE, FR, RU, zh-Hans, ES, JA, IT, then KO, pt-BR, PL and
-# MAGIC zh-Hant.**
+# MAGIC How far into that band to go is the actual decision, and counting one language at a time answers
+# MAGIC it:
+
+# COMMAND ----------
+
+display(outcome(games.filter(F.col("n_languages").between(9, 15)), "n_languages")
+        .orderBy("n_languages"))
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC **Every language added pays up to the thirteenth — 175 median reviews and a 28.7% breakout rate at
+# MAGIC nine, 696 and 43.2% at thirteen — and the fourteenth takes it back: 299 and 34.8% over 408
+# MAGIC games.** That reversal is the return threshold, and it settles the count on its own.
+# MAGIC
+# MAGIC Which thirteen is a second question, and the catalogue ranking above is the wrong one to answer
+# MAGIC it. What matters is the languages the games that actually reached scale ship:
+
+# COMMAND ----------
+
+display(games.filter(F.col("owners_min") >= 100000)
+             .select(F.explode("languages_list").alias("language"))
+             .groupBy("language").agg(F.count("*").alias("breakout_games"))
+             .orderBy(F.desc("breakout_games")).limit(15))
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC The two rankings agree on the set — the same twelve names lead both, reordered, with Spanish and
+# MAGIC Italian higher among the games that broke out than in the catalogue at large. The thirteenth is
+# MAGIC **Turkish**, which sits fourteenth by catalogue volume and thirteenth here.
+# MAGIC
+# MAGIC **Decision — languages: thirteen — EN, DE, FR, ES, RU, IT, zh-Hans, JA, pt-BR, PL, KO, zh-Hant
+# MAGIC and TR.**
 # MAGIC
 # MAGIC ## 3.5 Age restriction
 
@@ -729,13 +872,13 @@ display(games.filter(F.col("positive_ratio") == 1)
 
 # MAGIC %md
 # MAGIC Ranking on the raw ratio returns 8 634 games tied at 100%, most of them on one or two reviews.
-# MAGIC The Wilson lower bound breaks the tie by asking how much evidence sits behind the score; with a
-# MAGIC floor of 500 reviews it produces a list that means something.
+# MAGIC The Wilson lower bound breaks the tie by asking how much evidence sits behind the score. No
+# MAGIC review floor is applied below: thin evidence is exactly what the bound already discounts, and
+# MAGIC adding a threshold on top would only hide the fact that it works.
 
 # COMMAND ----------
 
-display(games.filter(F.col("reviews") >= 500)
-             .select("name", "publisher_clean", "reviews",
+display(games.select("name", "publisher_clean", "reviews",
                      F.round("positive_ratio", 4).alias("positive_ratio"),
                      F.round("wilson_score", 4).alias("wilson_score"),
                      "release_year")
@@ -744,13 +887,47 @@ display(games.filter(F.col("reviews") >= 500)
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC The top of the list is not made of blockbusters. *Aseprite* is a pixel-art editor, *A Short Hike*
-# MAGIC and *Patrick's Parabox* are one-person indie games, and the highest-rated large title is
-# MAGIC **Portal 2 at 98.8% over 309 441 reviews** — which is the more useful benchmark, because
-# MAGIC sustaining that ratio at that volume is the hard part.
+# MAGIC Two of the 8 634 perfect scores survive it — *The Void Rains Upon Her Heart* on 496 reviews and
+# MAGIC *祈風 Inorikaze* on 327 — and the other 8 632 do not. Those two are the largest of the group, which
+# MAGIC is the bound working rather than leaking.
 # MAGIC
-# MAGIC **Reference point — a Ubisoft-scale title doing well on Steam sits near 90% positive; 95%+ at
-# MAGIC 100 000+ reviews is exceptional.**
+# MAGIC The top of the list is not made of blockbusters. *Aseprite* is a pixel-art editor, *A Short Hike*
+# MAGIC and *Patrick's Parabox* are one-person indie games, and the only two titles holding that ratio at
+# MAGIC scale are **People Playground at 98.9% over 144 569 reviews and Portal 2 at 98.8% over 309 441** —
+# MAGIC the more useful benchmark, because sustaining the ratio at that volume is the hard part.
+# MAGIC
+# MAGIC Where Ubisoft's own catalogue sits against that needs the review volume held constant: the
+# MAGIC positive ratio climbs with the number of reviews, so comparing Ubisoft to the catalogue at large
+# MAGIC would be comparing it to 39 195 games nobody reviewed.
+
+# COMMAND ----------
+
+ubisoft = F.col("publisher_clean").rlike("(?i)^ubisoft")
+
+review_rank = (F.when(F.col("reviews") < 10, 0).when(F.col("reviews") < 100, 1)
+                .when(F.col("reviews") < 1000, 2).when(F.col("reviews") < 10000, 3).otherwise(4))
+review_band = (F.when(review_rank == 0, "1-9").when(review_rank == 1, "10-99")
+                .when(review_rank == 2, "100-999").when(review_rank == 3, "1 000-9 999")
+                .otherwise("10 000+"))
+
+display(games.filter(F.col("reviews") > 0)
+    .withColumn("rank", review_rank).withColumn("reviews_band", review_band)
+    .groupBy("rank", "reviews_band").agg(
+        F.count("*").alias("games"),
+        F.round(F.percentile_approx("positive_ratio", 0.5), 3).alias("median_ratio"),
+        F.sum(ubisoft.cast("int")).alias("ubisoft_games"),
+        F.round(F.percentile_approx(F.when(ubisoft, F.col("positive_ratio")), 0.5), 3)
+         .alias("ubisoft_median"))
+    .orderBy("rank").drop("rank"))
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC **Reference point — no Ubisoft title appears in the fifteen above, and once the comparison holds
+# MAGIC review volume constant its catalogue sits below the market in every band it occupies: 74.9%
+# MAGIC against 79.4% between 100 and 999 reviews, 78.8% against 85.5% between 1 000 and 9 999, 83.0%
+# MAGIC against 89.4% above 10 000.** The bar for the next game is not the top of the list — it is
+# MAGIC Ubisoft's own back catalogue, and that bar currently sits under the market's.
 
 # COMMAND ----------
 
@@ -765,7 +942,8 @@ display(games.filter(F.col("reviews") >= 500)
 # COMMAND ----------
 
 # the raw comma-separated string is dropped: the exploded label replaces it
-genre_rows = games.drop("genre").select("*", F.explode("genres").alias("genre")).cache()
+genre_rows = materialise(games.drop("genre").select("*", F.explode("genres").alias("genre")),
+                         "steam_genre_rows")
 print(f"{genre_rows.count():,} (game, genre) rows for {games.count():,} games")
 
 # COMMAND ----------
@@ -789,18 +967,28 @@ display(genre_rows.groupBy("genre").agg(F.count("*").alias("games"))
 # MAGIC those three, the shelf is **Action (43%), Casual (40%), Adventure (38%), Strategy (20%),
 # MAGIC Simulation (19%), RPG (17%)**, and everything else is under 5%.
 # MAGIC
+# MAGIC The field mixes more than that. Its 28 labels cover game genres, funding and release states
+# MAGIC (*Indie*, *Early Access*, *Free to Play*), content warnings (*Violent*, *Gore*, *Nudity*), eleven
+# MAGIC software categories (*Utilities*, *Photo Editing*, *Design & Illustration*, *Game Development*, …)
+# MAGIC and one stray *Movie*. The software rows are software: **Wallpaper Engine, Blender, Aseprite,
+# MAGIC Godot Engine and Source Filmmaker** are all in this catalogue because Steam types them as games,
+# MAGIC which the `type == 'game'` filter in 2.1 cannot separate. None of those labels reaches 700 games,
+# MAGIC but they are not removed either, so they appear in the tables below next to real genres.
+# MAGIC
 # MAGIC For Ubisoft the labels that matter are the six real ones. The rest of section 4 keeps all of
 # MAGIC them in the tables, because the contrast between *Indie* and the others is itself informative.
 # MAGIC
 # MAGIC ## 4.2 Which genres are liked
 # MAGIC
-# MAGIC Restricted to the 21 669 games with at least 50 reviews, so the ratio means something.
+# MAGIC Every genre carrying at least 100 games, with no review floor. A floor would lift each genre by
+# MAGIC about two points — better-reviewed games are better rated, as 3.6 shows — and drop seven of the
+# MAGIC twenty-two, including the lowest-rated one.
 # MAGIC
 # MAGIC *Chart: bar, `genre` x `median_positive_ratio`.*
 
 # COMMAND ----------
 
-display(genre_rows.filter(F.col("reviews") >= 50).groupBy("genre")
+display(genre_rows.groupBy("genre")
         .agg(F.count("*").alias("games"),
              F.round(F.percentile_approx("positive_ratio", 0.5), 3).alias("median_positive_ratio"),
              F.round(F.sum("positive") / (F.sum("positive") + F.sum("negative")), 3).alias("pooled_ratio"))
@@ -809,19 +997,24 @@ display(genre_rows.filter(F.col("reviews") >= 50).groupBy("genre")
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC The spread is narrow — **0.82 for Casual and Adventure down to 0.78 for Strategy** — with one
-# MAGIC exception. **Massively Multiplayer sits at 0.665**, fifteen points below everything else, and it
-# MAGIC is the genre where the median game is actively disliked. Live-service games are judged on
-# MAGIC servers, monetisation and updates long after launch, and this is what that judgement looks like
-# MAGIC in aggregate.
+# MAGIC Read on the nine labels that are actually game genres, eight fit inside five and a half points —
+# MAGIC **Casual 0.803, Adventure 0.797, Action 0.789, RPG 0.779, Strategy 0.769, Racing 0.754, Sports
+# MAGIC 0.750, Simulation 0.748** — and the ninth is nowhere near them. **Massively Multiplayer sits at
+# MAGIC 0.648**, ten points below the lowest of the eight and lowest on the pooled column too at 0.731 —
+# MAGIC the only row under it is *Violent*, a content warning rather than a genre. Live-service games are
+# MAGIC judged on servers, monetisation and updates long after launch, and this is what that judgement
+# MAGIC looks like in aggregate.
 # MAGIC
 # MAGIC The two columns disagree on purpose. The pooled ratio weights every review equally, so it
 # MAGIC measures *the average experience across the genre*; the median weights every game equally, so it
-# MAGIC measures *the typical game*. Indie is 0.813 typical and 0.886 pooled — its big titles are much
-# MAGIC better liked than its median one.
+# MAGIC measures *the typical game*. Indie is 0.800 typical and 0.885 pooled — its big titles are much
+# MAGIC better liked than its median one. The software labels stretch that to absurdity: Photo Editing
+# MAGIC reads 0.750 typical against 0.977 pooled, because Wallpaper Engine alone brings 572 127 reviews
+# MAGIC to a label of 105 rows.
 # MAGIC
-# MAGIC **Decision — avoid a live-service / MMO structure. The satisfaction penalty is the largest
-# MAGIC single effect in the genre data.**
+# MAGIC **Decision — avoid a live-service / MMO structure. The satisfaction penalty is the largest single
+# MAGIC effect in the genre data, and the only one attached to a design choice rather than to content or
+# MAGIC to a store category.**
 # MAGIC
 # MAGIC ## 4.3 Do publishers have favourite genres
 # MAGIC
@@ -851,7 +1044,7 @@ display(genre_rows.filter(F.col("publisher_clean").isin(top_publishers))
 
 display(genre_rows.filter(F.col("publisher_clean").rlike("^Ubisoft"))
         .groupBy("genre").agg(F.count("*").alias("games"),
-                              F.round(F.sum("revenue_proxy") / 1e6).alias("revenue_proxy_musd"))
+                              F.round(F.sum("owners_x_price") / 1e6).alias("owners_x_price_musd"))
         .orderBy(F.desc("games")).limit(8))
 
 # COMMAND ----------
@@ -862,47 +1055,87 @@ display(genre_rows.filter(F.col("publisher_clean").rlike("^Ubisoft"))
 # MAGIC
 # MAGIC ## 4.4 Which genres are worth entering
 # MAGIC
-# MAGIC The revenue proxy is `owners x list price`. Summed by genre it gives each genre's share of the
-# MAGIC market's value, which can be set against its share of releases:
+# MAGIC `owners_x_price` averaged over each genre, in millions (2.9 defines it). For one game it is every
+# MAGIC copy anyone owns, priced at the store's list price and added up; the column averages that over
+# MAGIC the genre's games. **It is a total accumulated since release — not a price, and not a yearly
+# MAGIC figure.** `mean_price_usd` sits next to it for exactly that reason: what one copy costs, in the
+# MAGIC same table as what all the copies add up to. `pct_free` says how much of the genre the proxy
+# MAGIC scores at zero.
 # MAGIC
-# MAGIC **opportunity = share of proxy revenue / share of releases.** Above 1, the genre returns more
-# MAGIC value than the shelf space it takes.
-# MAGIC
-# MAGIC *Chart: scatter, `share_of_releases` x `share_of_revenue`, size `games`, label `genre`.*
+# MAGIC *Chart: bar, `genre` x `stock_value_musd`.*
 
 # COMMAND ----------
 
-total_games = games.count()
-total_revenue = games.agg(F.sum("revenue_proxy")).collect()[0][0]
-
-genre_economics = (genre_rows.groupBy("genre")
-    .agg(F.count("*").alias("games"),
-         F.sum("revenue_proxy").alias("revenue"),
-         F.round(F.avg("revenue_proxy")).alias("mean_revenue_per_game"),
-         F.round(100 * F.avg((F.col("owners_min") >= 100000).cast("int")), 1).alias("breakout_pct"),
-         F.round(100 * F.avg(F.col("is_free").cast("int")), 1).alias("pct_free"))
-    .filter(F.col("games") >= 150)
-    .withColumn("share_of_releases", F.round(100 * F.col("games") / total_games, 1))
-    .withColumn("share_of_revenue", F.round(100 * F.col("revenue") / total_revenue, 1))
-    .withColumn("opportunity", F.round((F.col("revenue") / total_revenue) / (F.col("games") / total_games), 2)))
-
-display(genre_economics.drop("revenue").orderBy(F.desc("opportunity")))
+display(genre_rows.groupBy("genre")
+        .agg(F.count("*").alias("games"),
+             F.round(F.avg("owners_x_price") / 1e6, 2).alias("stock_value_musd"),
+             F.round(F.avg("initial_price_usd"), 2).alias("mean_price_usd"),
+             F.round(100 * F.avg(F.col("is_free").cast("int")), 1).alias("pct_free"))
+        .filter(F.col("games") >= 150)
+        .orderBy(F.desc("stock_value_musd")))
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC Three genres return more than they take — **Massively Multiplayer at 2.96, RPG at 1.81, Action
-# MAGIC at 1.52** — and two are badly crowded: **Casual takes 40% of the shelf for 8.7% of the value
-# MAGIC (0.22), Indie 71% for 35% (0.49)**. Strategy, Adventure and Simulation sit at parity.
+# MAGIC **Massively Multiplayer leads at 5.14 M$ a game, ahead of RPG at 3.14 M$ and Action at
+# MAGIC 2.63 M$**, while the two largest shelves in the catalogue carry the least: **Indie 0.86 M$ over
+# MAGIC 39 681 games, Casual 0.38 M$ over 22 086**.
 # MAGIC
-# MAGIC Two readings to be careful with. **Free to Play scores 0.02 not because free games make no money
-# MAGIC but because the proxy cannot see any revenue that is not a store price** — an in-game economy is
-# MAGIC invisible here. The same blindness deflates Massively Multiplayer, 53% of which is free, and it
-# MAGIC still comes out on top; its true opportunity is higher than 2.96, not lower. And the whole column
-# MAGIC inherits the proxy's biases, so it ranks genres, it does not value them.
+# MAGIC `mean_price_usd` says where that spread does *not* come from. Across the nine real genres the
+# MAGIC average price varies by a factor of **1.8**, from $5.20 for MMO to $9.38 for Simulation, while
+# MAGIC the stock value varies by a factor of **13**, from Casual's 0.38 M$ to MMO's 5.14 M$. Choosing a
+# MAGIC genre barely moves the price a studio can ask; it moves how many people end up owning the game. The software labels invert the pair: **the six
+# MAGIC highest prices in the table are all software, $19.11 to $21.36, and not one of them reaches
+# MAGIC 0.85 M$**. That is what a niche tool at a high price looks like.
 # MAGIC
-# MAGIC Set against 4.2, that gives one clean answer: **MMO buys the best economics and the worst
-# MAGIC satisfaction. RPG is second on economics with no such penalty.**
+# MAGIC `pct_free` marks the distortion in the other direction. **Free to Play averages 0.03 M$ a game
+# MAGIC not because free games make no money but because a list price of zero times any number of owners
+# MAGIC is zero** — an in-game economy is invisible here. The same blindness cuts into Massively
+# MAGIC Multiplayer, 53% of which is free.
+# MAGIC
+# MAGIC Which is where `mean_price_usd` has to be read a second time, because it averages those zeros
+# MAGIC too. For a genre that is half free it reports a share of free games dressed up as a price. The
+# MAGIC same three measures on paid games only, where every row has a price a studio could actually set:
+# MAGIC
+# MAGIC *Chart: bar, `genre` x `mean_owners_paid`.*
+
+# COMMAND ----------
+
+display(genre_rows.filter(~F.col("is_free")).groupBy("genre")
+        .agg(F.count("*").alias("paid_games"),
+             F.round(F.avg("initial_price_usd"), 2).alias("mean_price_paid"),
+             F.round(F.avg("owners_x_price") / 1e6, 2).alias("stock_value_paid_musd"),
+             F.round(F.avg("owners_mid")).alias("mean_owners_paid"))
+        .filter(F.col("paid_games") >= 100)
+        .orderBy(F.desc("stock_value_paid_musd")))
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC **MMO's $5.20 was not a low price, it was a high share of free games** — and the two columns are
+# MAGIC related by an identity rather than a tendency: `mean_price_usd` is exactly
+# MAGIC `(1 - pct_free) x mean_price_paid`, on every row of the table above to within rounding. It is a
+# MAGIC price multiplied by a participation rate, which is why it cannot be read as a price. On its paid
+# MAGIC half MMO charges **$11.08, the most of any real genre and 2.1 times what the published column
+# MAGIC reports**, and its stock value *rises* to 10.93 M$ instead of falling: the zeros were holding it
+# MAGIC down, not propping it up.
+# MAGIC
+# MAGIC The damage is specific, and worth knowing because the rest of section 4 keeps reading that
+# MAGIC column. The eight other real genres are **84.5% to 88.7% paid**, so the identity shaves each of
+# MAGIC them by about the same eighth and leaves their order untouched — drop MMO and the price spread is
+# MAGIC 1.62 published against 1.66 paid. **MMO is the one row where half the genre is missing from its
+# MAGIC own average**, which is exactly what made it look cheap. Across all nine the spread is **1.7** on
+# MAGIC paid games, MMO at the top of it rather than the bottom, while the value spread widens from 13
+# MAGIC to **25**.
+# MAGIC
+# MAGIC So the value does come from reach, and here it can be shown rather than inferred: **a paid MMO
+# MAGIC averages 381 000 owners against 160 000 for a paid RPG and 143 000 for a paid Action** — two and
+# MAGIC a half times the audience, at the same price. What a premium single-player release cannot copy is
+# MAGIC that audience and the in-game economy behind it, not a pricing trick.
+# MAGIC
+# MAGIC Set against 4.2, where MMO is last on satisfaction, that leaves **RPG and Action: second and
+# MAGIC third on stock value, at ordinary prices, with no satisfaction penalty.**
+# MAGIC
 # MAGIC
 # MAGIC ## 4.5 Is any genre emerging
 # MAGIC
@@ -935,27 +1168,72 @@ display(genre_mix.orderBy(F.desc("pct_2022")).limit(12))
 # MAGIC
 # MAGIC ## 4.6 The slot
 # MAGIC
-# MAGIC Putting 4.2 and 4.4 together with the price band from 3.3 — games released from 2018, priced
-# MAGIC $20-40:
+# MAGIC Every genre comparison so far ran on the whole catalogue, where a genre's numbers move with what
+# MAGIC it charges and how much of it is free — which is exactly what 4.4 had to unpick for MMO. This one
+# MAGIC holds both fixed: released from 2018, priced $20-40, the band 3.3 settled on. What is left is
+# MAGIC reach and satisfaction, compared on equal commercial ground.
+# MAGIC
+# MAGIC Three of the nine real genres fall below the 150-game floor here — MMO, Racing, Sports — so the
+# MAGIC case against live service stays where it was made, in 4.2 and 4.4. Indie and Early Access are in
+# MAGIC the table for contrast rather than as candidates, and `is_genre` marks which rows are which.
 # MAGIC
 # MAGIC *Chart: combo — bars `games`, line `breakout_pct`, on `genre`.*
 
 # COMMAND ----------
 
+# the band is 3.3's, expressed the same way: [20, 40)
+REAL_GENRES = ["Action", "Adventure", "Casual", "RPG", "Strategy",
+               "Simulation", "Racing", "Sports", "Massively Multiplayer"]
+
 display(outcome(genre_rows.filter((F.col("release_year") >= 2018)
-                                  & F.col("price_usd").between(20, 40)), "genre")
-        .filter(F.col("games") >= 150).orderBy(F.desc("breakout_pct")))
+                                  & (F.col("price_usd") >= 20) & (F.col("price_usd") < 40)), "genre")
+        .filter(F.col("games") >= 150)
+        .withColumn("is_genre", F.col("genre").isin(REAL_GENRES))
+        .orderBy(F.desc("breakout_pct")))
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC In the band Ubisoft would actually price into, **Action reaches a 34.9% breakout rate over 776
-# MAGIC games and RPG 33.8% over 471**, against 27.8% for Adventure. Adventure trades six points of
-# MAGIC breakout for the best satisfaction of the three (0.790). Action and RPG overlap heavily — most of these games carry both labels —
-# MAGIC which is the combination the recommendation lands on.
+# MAGIC In the band Ubisoft would actually price into, **Action and RPG take the top two places, 34.9%
+# MAGIC and 33.8% breakout**, ahead of Strategy at 31.2% and Adventure at 27.8%. The same pair leads
+# MAGIC 4.4's stock value, on a different measure over a different population. That agreement is the
+# MAGIC finding.
 # MAGIC
-# MAGIC **Decision — genre: Action-RPG, single-player, premium. Not Casual, not Indie-positioned, not
-# MAGIC live service.**
+# MAGIC Their order is not. 34.9% on 776 games and 33.8% on 471 carry standard errors of 1.7 and 2.2
+# MAGIC points, so the 1.1-point gap sits well inside them, and Strategy is not separable from RPG
+# MAGIC either. **The top three are a plateau, not a ranking.** What does separate is the bottom:
+# MAGIC Adventure and Indie are three standard errors under Action, and Casual at 15.2% is in another
+# MAGIC regime entirely.
+# MAGIC
+# MAGIC Adventure trades seven points of breakout for the best satisfaction of the three (0.790). Indie's
+# MAGIC 28.0% is a different animal: 865 of the catalogue's 39 681 Indie rows survive this filter, so the
+# MAGIC number does not describe the shelf 4.4 measured at 0.86 M$.
+# MAGIC
+# MAGIC A plateau is an argument for taking both labels rather than choosing between them — provided they
+# MAGIC are one position and not two:
+
+# COMMAND ----------
+
+slot = games.filter((F.col("release_year") >= 2018)
+                    & (F.col("price_usd") >= 20) & (F.col("price_usd") < 40))
+a, r = F.array_contains("genres", "Action"), F.array_contains("genres", "RPG")
+
+display(slot.select(
+    F.sum(a.cast("int")).alias("action"),
+    F.sum(r.cast("int")).alias("rpg"),
+    F.sum((a & r).cast("int")).alias("both"),
+    F.round(100 * F.sum((a & r).cast("int")) / F.sum(r.cast("int")), 1).alias("pct_of_rpg_also_action")))
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC **228 of the band's 471 RPGs also carry Action** — just under half, on the smaller of the two
+# MAGIC labels. The rows are not independent samples, and the intersection is a real, populated position
+# MAGIC in the catalogue rather than a compromise between two separate genres.
+# MAGIC
+# MAGIC **Decision — genre: Action-RPG, single-player, premium.** Not Casual (15.2%, here). Not live
+# MAGIC service (0.648 satisfaction in 4.2, an audience 4.4 shows a premium release cannot buy). Not
+# MAGIC Indie-positioned — a funding label rather than a genre (4.1), and not a claim Ubisoft can make.
 
 # COMMAND ----------
 
@@ -1029,9 +1307,11 @@ display(outcome(games, "n_platforms").orderBy("n_platforms"))
 # COMMAND ----------
 
 display(outcome(games.filter(F.col("release_year") >= 2018)
+                     .withColumn("rank", band_rank)
                      .withColumn("band", price_band)
                      .withColumn("ported", F.col("n_platforms") > 1),
-                "band", "ported").orderBy("band", "ported"))
+                "rank", "band", "ported")
+        .orderBy("rank", "ported").drop("rank"))
 
 # COMMAND ----------
 
@@ -1077,11 +1357,11 @@ display(games.join(publisher_size, "publisher_clean")
 # MAGIC
 # MAGIC | | decision | evidence |
 # MAGIC |---|---|---|
-# MAGIC | **Genre** | Action-RPG, single-player, premium | Action 1.52 and RPG 1.81 on revenue-to-releases; 34.9% and 33.8% breakout in the $20-40 band (4.4, 4.6) |
-# MAGIC | **Not** | live service or MMO | MMO carries the best economics *and* a 0.665 median positive ratio, fifteen points below every other genre (4.2) |
-# MAGIC | **Price** | $29.99 - $39.99 | the $20-40 band returns 378 median reviews and a 31.9% breakout rate; above $40 the market thins to 567 games (3.3) |
+# MAGIC | **Genre** | Action-RPG, single-player, premium | Action and RPG carry 2.63 M$ and 3.14 M$ of stock value a game at ordinary prices, $7.98 and $9.36; 34.9% and 33.8% breakout in the $20-40 band (4.4, 4.6) |
+# MAGIC | **Not** | live service or MMO | MMO leads on stock value by audience, not by price: a paid MMO averages 381 000 owners against 160 000 for a paid RPG at the same $11 — an audience, and an in-game economy this dataset cannot see, that a premium release cannot buy. And it carries a 0.648 median positive ratio, ten points below the lowest of the eight other real genres (4.2, 4.4) |
+# MAGIC | **Price** | $29.99 or $39.99 | on near-identical samples, $29.99 returns 496 median reviews and a 36.0% breakout rate against $24.99's 170 and 24.9%; $34.99 sits below both (3.3) |
 # MAGIC | **Platforms** | Windows at launch, Mac and Linux planned in | Windows is 99.97% of the catalogue; ported games lead inside every price band, and porting is not a big-studio behaviour (5.1, 5.3) |
-# MAGIC | **Languages** | twelve: EN, DE, FR, RU, zh-Hans, ES, JA, IT, KO, pt-BR, PL, zh-Hant | success climbs to the 15-20 band, 39% breakout, then collapses into shovelware above 21 (3.4) |
+# MAGIC | **Languages** | thirteen: EN, DE, FR, ES, RU, IT, zh-Hans, JA, pt-BR, PL, KO, zh-Hant, TR | every language added pays up to the thirteenth — 696 median reviews and a 43.2% breakout rate — and the fourteenth reverses it (3.4) |
 # MAGIC | **Window** | February to May | November and December take the most releases and return the least: 19 median reviews and 7.5% breakout, against 26-27 and 9-10% in spring (3.2) |
 # MAGIC | **Rating** | mature is not a constraint | 12.8% of the catalogue is mature-tagged and outperforms the rest; Steam's own age field is empty for 98.8% of games (3.5) |
 # MAGIC
@@ -1089,7 +1369,7 @@ display(games.join(publisher_size, "publisher_clean")
 # MAGIC
 # MAGIC - **The competitor set is about thirty publishers, not fifty thousand.** 41% of Steam's catalogue
 # MAGIC   comes from publishers with a single release, and the twenty largest account for 5% of it.
-# MAGIC   Ubisoft's rivals are the names in 3.1's revenue table.
+# MAGIC   Ubisoft's rivals are the names in 3.1's `owners_x_price` table.
 # MAGIC - **There is no wave to catch.** The genre mix moved by less than two points in five years. The
 # MAGIC   concept has to win on execution inside a category that already pays, not on timing.
 # MAGIC
@@ -1103,10 +1383,10 @@ display(games.join(publisher_size, "publisher_clean")
 # MAGIC after that date exists — no Steam Deck effect, no post-2022 pricing.
 # MAGIC
 # MAGIC **There are no sales.** `owners` is SteamSpy's *estimate*, published as a bracket, and 68% of the
-# MAGIC catalogue falls in the bottom one. The revenue proxy multiplies that bracket's midpoint by the
+# MAGIC catalogue falls in the bottom one. `owners_x_price` multiplies that bracket's midpoint by the
 # MAGIC list price, so it ignores Steam's 30% cut, regional pricing, discounts, refunds, bundles, free
 # MAGIC keys — and it values every free-to-play game at zero, which is why section 4.4 reads *Free to
-# MAGIC Play: 0.02* for a business model that funds some of the largest games in the table.
+# MAGIC Play: 0.03 M$ a game* for a business model that funds some of the largest games in the table.
 # MAGIC
 # MAGIC **Reviews are not players.** They correlate with owners at 0.76 on the log scale, which is enough
 # MAGIC to rank and not enough to size.
