@@ -35,19 +35,19 @@ Three properties drive the whole pipeline:
 
 ## What we found
 
-### Steam is a long tail with thirty companies on the end of it
+### Steam is a long tail with two hundred companies on the end of it
 
 **41% of the catalogue comes from publishers that have released exactly one game**, and the twenty
-largest account for 5% of releases. Big Fish Games has published the most (423). Rank the same
-publishers by revenue instead of volume and the list changes completely — **Ubisoft comes first**,
-ahead of EA and Valve. The competitor set is that table, not the 29 824 publishers on the store.
+largest account for 5% of releases. Big Fish Games has published the most (423), ahead of 8floor
+(202) and SEGA (165); Ubisoft is tenth with 128. At the other end, 195 publishers have released 21
+games or more and hold 17% of the catalogue — that is the field, not the 29 824 names on the store.
 
 ### Covid did not slow releases — the dip is the year before
 
 8 305 games in 2020 and 8 823 in 2021, the two largest years in the dataset, against a dip to
-6 968 in 2019. But **November and December are the worst months to launch in**: 19 median reviews
-and a 7.5% breakout rate, against 26-27 and 9-10% in February to May. The holiday window belongs
-to the titles that can buy visibility in it.
+6 968 in 2019 — a plateau that starts in 2018, neither broken nor accelerated by the pandemic.
+Inside the year the calendar is a season: **the six lightest release months are exactly January to
+June**, and October ships 4 451 games against January's 3 096.
 
 ### The crowded genres are the poor ones
 
@@ -70,10 +70,10 @@ reviews against 238 at $20-40. Porting rates barely move with publisher size (24
 | | decision |
 |---|---|
 | **Genre** | Action-RPG, single-player, premium — not Casual, not live service |
-| **Price** | $29.99 - $39.99 |
+| **Price** | the $20-40 band |
 | **Platforms** | Windows at launch, Mac and Linux planned in |
 | **Languages** | twelve: EN, DE, FR, RU, zh-Hans, ES, JA, IT, KO, pt-BR, PL, zh-Hant |
-| **Window** | February to May |
+| **Window** | the first half of the year |
 | **Rating** | mature is not a commercial handicap |
 
 Quality bar: **90% positive is a good Ubisoft-scale result on Steam, 95% at scale is exceptional**
@@ -116,9 +116,9 @@ whole argument:
 |---|---|---|
 | 1 | 1.1 / 1.2 | the 441 columns inference invents for `tags`, then the explicit schema |
 | 2 | 2.10 | the cleaning report |
-| 3 | 3.1 | top publishers by volume, then by revenue proxy |
-| 4 | 3.2 | releases per year, and the launch month table |
-| 5 | 3.3 | the price band table |
+| 3 | 3.1 | top publishers by volume, then the concentration table |
+| 4 | 3.2 | releases per year, and releases per month |
+| 5 | 3.3 | the price band table, and discounts by band |
 | 6 | 3.4 | the localisation band table |
 | 7 | 3.6 | the Wilson ranking |
 | 8 | 4.4 | the opportunity scatter |

@@ -464,34 +464,6 @@ display(report)
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ### 2.11 How success is measured, from here on
-# MAGIC
-# MAGIC Nothing in this dataset is a sales figure. Two measures stand in, and every comparison in the
-# MAGIC notebook reports both:
-# MAGIC
-# MAGIC - **median review count** — continuous, and it separates the bottom of the catalogue where the
-# MAGIC   owners bracket cannot;
-# MAGIC - **breakout rate** — the share of games that reached at least 100 000 owners.
-# MAGIC
-# MAGIC They are not independent: on the log scale, review count and owner midpoint correlate at
-# MAGIC **0.76**, which is what justifies using reviews as a stand-in for reach at all.
-
-# COMMAND ----------
-
-display(games.filter(F.col("reviews") > 0).select(
-    F.round(F.corr(F.log("reviews"), F.log(F.greatest("owners_mid", F.lit(1)))), 3).alias("corr_log_reviews_owners")))
-
-def outcome(df, *group_by):
-    """Volume and the two success measures, for any grouping."""
-    return (df.groupBy(*group_by).agg(
-        F.count("*").alias("games"),
-        F.percentile_approx("reviews", 0.5).alias("median_reviews"),
-        F.round(100 * F.avg((F.col("owners_min") >= 100000).cast("int")), 1).alias("breakout_pct"),
-        F.round(F.avg("positive_ratio"), 3).alias("mean_positive_ratio")))
-
-# COMMAND ----------
-
-# MAGIC %md
 # MAGIC ---
 # MAGIC # 3. The market
 # MAGIC
@@ -502,16 +474,10 @@ def outcome(df, *group_by):
 # COMMAND ----------
 
 by_publisher = (games.groupBy("publisher_clean")
-    .agg(F.count("*").alias("games"),
-         F.round(F.sum("owners_x_price") / 1e6).alias("owners_x_price_musd"))
+    .agg(F.count("*").alias("games"))
     .filter(F.col("publisher_clean").isNotNull()))
 
 display(by_publisher.orderBy(F.desc("games")).limit(20))
-
-display(games.select(
-    F.countDistinct("publisher_clean").alias("named_publishers"),
-    F.count("*").alias("games"),
-    F.sum(F.col("publisher_clean").isNull().cast("int")).alias("no_publisher")))
 
 # COMMAND ----------
 
@@ -519,9 +485,9 @@ display(games.select(
 # MAGIC **Big Fish Games** has released the most games — 423, casual hidden-object titles — ahead of
 # MAGIC 8floor (202) and SEGA (165). Ubisoft is tenth with 128.
 # MAGIC
-# MAGIC That ranking says less than the shape behind it. Steam has **29 824 named publishers for
-# MAGIC 55 690 games** (134 of which carry no publisher, and so appear in none of the rankings above),
-# MAGIC and the concentration is the finding:
+# MAGIC That ranking says less than the shape behind it. The 55 690 games spread over 29 824 named
+# MAGIC publishers — 134 games carry no publisher at all, and appear in no ranking here — and the
+# MAGIC concentration is the finding:
 
 # COMMAND ----------
 
@@ -541,45 +507,27 @@ orphans = (games.filter(F.col("publisher_clean").isNull())
 concentration = (buckets.unionByName(orphans)
     .withColumn("pct_of_catalogue", F.round(100 * F.col("games") / games.count(), 1)))
 
-display(concentration.orderBy(F.col("size") == "no publisher", "publishers"))
+# the total row holds the two catalogue-wide figures the text above quotes
+total = concentration.agg(
+    F.lit("all").alias("size"),
+    F.sum("publishers").alias("publishers"),
+    F.sum("games").alias("games"),
+    F.round(100 * F.sum("games") / games.count(), 1).alias("pct_of_catalogue"))
+
+display(concentration.unionByName(total)
+        .orderBy(F.col("size").isin("no publisher", "all"), "publishers"))
 
 # COMMAND ----------
 
 # MAGIC %md
 # MAGIC **41% of the catalogue comes from publishers that have released exactly one game**, and the
 # MAGIC twenty largest publishers together account for 5% of releases. Steam is not a market of a few
-# MAGIC big houses — it is a very long tail with a handful of large firms on the end of it.
-# MAGIC
-# MAGIC Rank the same publishers by `owners_x_price` instead of by volume and a different set of names
-# MAGIC appears. The table below drops the one-game publishers — 23 018 of the 29 824, and the only
-# MAGIC group whose total is a single title by construction. Above that the concentration falls off
-# MAGIC smoothly rather than at a threshold, so `value_per_game_musd` is read next to `games`: on three
-# MAGIC or four releases it is still close to one title's figure.
-# MAGIC
-# MAGIC *Chart: bar, `publisher_clean` x `owners_x_price_musd`.*
-
-# COMMAND ----------
-
-display(by_publisher.filter(F.col("games") >= 2)
-                    .withColumn("value_per_game_musd", F.round(F.col("owners_x_price_musd") / F.col("games"), 1))
-                    .orderBy(F.desc("owners_x_price_musd")).limit(20))
+# MAGIC big houses — it is a very long tail, and the 195 publishers with 21 releases or more hold 17%
+# MAGIC of it.
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC Volume and value are close to unrelated. **Big Fish Games leads on releases with 423 and comes
-# MAGIC 177th of the 6 806 publishers with more than one game once the same list is ranked by
-# MAGIC `owners_x_price`.** **For Ubisoft the competitor set is not "everyone on Steam"** — it is the thirty-odd
-# MAGIC publishers in this table.
-# MAGIC
-# MAGIC One caveat on the order. `publisher` is free text, so this ranks spellings, not firms. Across the
-# MAGIC catalogue 175 names appear under 355 different spellings (6.0% of the proxy), and 2 060 strings
-# MAGIC credit several parties at once (16.7%) — 959 of those name a partner that also publishes under
-# MAGIC its own name, which detaches 12.4% of the proxy from firms already present in the ranking. A firm
-# MAGIC that co-publishes and ships Mac and Linux ports is split across many rows; one that always writes
-# MAGIC its name the same way is not. The order rewards naming consistency as much as size, so what this
-# MAGIC table identifies is the set of names, not their sequence.
-# MAGIC
 # MAGIC ## 3.2 The release calendar
 # MAGIC
 # MAGIC *Chart: bar, `release_year` x `games`.*
@@ -589,69 +537,53 @@ display(by_publisher.filter(F.col("games") >= 2)
 per_year = (games.filter(F.col("release_year").isNotNull())
                  .groupBy("release_year").agg(F.count("*").alias("games"))
                  .orderBy("release_year"))
-display(per_year.filter(F.col("release_year") >= 2006))
+display(per_year)
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC Releases grew every year to 2018, dipped in 2019 (6 968 against 7 678), then **rose through
-# MAGIC Covid — 8 305 in 2020 and 8 823 in 2021**, the two largest years in the dataset. Whatever the
-# MAGIC pandemic did to the industry, it did not slow the flow of new games on Steam; the only visible
-# MAGIC dip is *before* it.
+# MAGIC Two things are stacked in this column, and they separate around 2013. Before it the table counts
+# MAGIC a curated storefront rather than a market: Steam only opened to third-party publishers in 2005
+# MAGIC (Rag Doll Kung Fu and Darwinia, appid 1002 and 1500), and Valve picked by hand what went on sale
+# MAGIC — 61 games in 2006, still only 471 in 2013. Greenlight opens the gate at the end of 2012 and
+# MAGIC Steam Direct replaces it in 2017, and the two jumps in the table sit on that calendar: **471 to
+# MAGIC 1 557 in 2014**, then **4 185 to 6 017 in 2017**. Those two dates are Steam's history and not a
+# MAGIC measurement from this file, but they are why the early years cannot be read as an industry
+# MAGIC releasing fewer games. Those years are also a survivors' list — a November 2022 snapshot holds
+# MAGIC only what was still on sale (section 7).
 # MAGIC
-# MAGIC 2022 shows 7 455, but the snapshot stops on 11 November, so that year covers ten and a half
-# MAGIC months. At the 2022 daily pace it would have landed around 8 600 — flat against 2021, not down.
+# MAGIC **Covid neither slowed releases nor set them off.** 7 678 in 2018, 6 968 in 2019, then 8 305 in
+# MAGIC 2020 and 8 823 in 2021: the only dip is the year *before* the pandemic, and 2020-2021 extends a
+# MAGIC plateau that starts in 2018 rather than breaking it. 2022 reads 7 455, but `last_release` in 2.3
+# MAGIC is 11 November 2022 — that year is ten and a half months long, and its fall is an artefact.
+# MAGIC
+# MAGIC Inside the year, over the eight complete years from 2014, where the jump above turns the
+# MAGIC catalogue into a market, to 2021, the last full year the snapshot covers:
+# MAGIC
+# MAGIC *Chart: bar, `release_month` x `games`.*
 
 # COMMAND ----------
 
-display(games.filter(F.col("release_year") == 2022)
+display(games.filter(F.col("release_year").between(2014, 2021))
              .groupBy("release_month").agg(F.count("*").alias("games")).orderBy("release_month"))
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC Within the year, the question that matters for a launch is not how many games ship in a month
-# MAGIC but how the games that ship in it do. Restricted to paid games from the seven complete years
-# MAGIC 2015-2021:
+# MAGIC The calendar is not flat. **October is the busiest month at 4 451 releases and January the
+# MAGIC quietest at 3 096**, 44% apart, and the shape is a season rather than noise: the six lightest
+# MAGIC months of the year are exactly January to June, the six heaviest exactly July to December, with
+# MAGIC a second trough in June. The second half is the run-up to the holiday sales, and it is where the
+# MAGIC competition for a store slot sits.
 # MAGIC
-# MAGIC *Chart: combo — bars `games`, line `median_reviews`, on `release_month`.*
-
-# COMMAND ----------
-
-display(outcome(games.filter(F.col("release_year").between(2015, 2021) & ~F.col("is_free")), "release_month")
-        .orderBy("release_month"))
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC **November and December are the worst months to launch in** — median 19 reviews and a 7.5%
-# MAGIC breakout rate, against 26-27 reviews and 9-10% in February to May. October and November take the
-# MAGIC most releases and return the least attention per release. The holiday window belongs to the
-# MAGIC titles that can buy visibility in it.
+# MAGIC The table counts competitors, not buyers — it says how many games a launch shares its month
+# MAGIC with, and nothing about whether shipping next to them costs or pays.
 # MAGIC
-# MAGIC **Decision — release window: February to May, and not November or December.**
+# MAGIC **Decision — release window: the first half of the year, and not the September-December ramp.**
 # MAGIC
 # MAGIC ## 3.3 Price
 # MAGIC
-# MAGIC *Chart: bar, `price_usd` x `games`, on the 12 most common price points.*
-
-# COMMAND ----------
-
-display(games.filter(~F.col("is_free")).select(
-    F.round(F.percentile_approx("price_usd", 0.5), 2).alias("median_paid"),
-    F.round(F.percentile_approx("price_usd", 0.9), 2).alias("p90"),
-    F.round(F.percentile_approx("price_usd", 0.99), 2).alias("p99")))
-
-display(games.groupBy("price_usd").agg(F.count("*").alias("games")).orderBy(F.desc("games")).limit(12))
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC Steam prices are anchored on `.99`: after the 7 779 free games, the catalogue piles up on $4.99,
-# MAGIC $9.99 and $0.99. The median paid game is **$5.99** and the 99th percentile is $49.99 — a $70
-# MAGIC release is off this chart entirely.
-# MAGIC
-# MAGIC *Chart: combo — bars `games`, line `breakout_pct`, on `band`.*
+# MAGIC *Chart: bar, `band` x `games`.*
 
 # COMMAND ----------
 
@@ -670,41 +602,34 @@ price_band = (F.when(band_rank == 0, "free")
                .when(band_rank == 4, "$20-40")
                .otherwise("$40+"))
 
-display(outcome(games.withColumn("rank", band_rank).withColumn("band", price_band),
-                "rank", "band")
+display(games.filter(~F.col("is_free")).select(
+    F.round(F.min("price_usd"), 2).alias("min_paid"),
+    F.round(F.percentile_approx("price_usd", 0.5), 2).alias("median_paid"),
+    F.round(F.avg("price_usd"), 2).alias("mean_paid"),
+    F.round(F.stddev("price_usd"), 2).alias("stddev_paid"),
+    F.round(F.percentile_approx("price_usd", 0.9), 2).alias("p90"),
+    F.round(F.percentile_approx("price_usd", 0.99), 2).alias("p99"),
+    F.round(F.max("price_usd"), 2).alias("max_paid"),
+    F.round(100 * F.avg(((F.col("price").cast("int") % 100) == 99).cast("int")), 1).alias("pct_ends_99")))
+
+display(games.withColumn("rank", band_rank).withColumn("band", price_band)
+        .groupBy("rank", "band").agg(
+            F.count("*").alias("games"),
+            F.round(100 * F.count("*") / games.count(), 1).alias("pct_games"))
         .orderBy("rank").drop("rank"))
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC Every step up the price ladder buys more of both measures: from 15 median reviews and a 5.9%
-# MAGIC breakout rate under $5, to **378 reviews and 31.9% in the $20-40 band**. Above $40 the sample
-# MAGIC thins to 567 games and stops improving.
+# MAGIC Steam is a cheap store, and it prices in `.99`: **95.6% of paid games end on those two digits**.
+# MAGIC The mass sits at the bottom — **under $5 alone is 42.2% of the catalogue**, the largest band of
+# MAGIC the six, and free or under $10 is 78.6% of it. The paid median is $5.99 against a mean of $8.99;
+# MAGIC that gap, and a standard deviation of $11.30 on that mean, is a thin tail stretching right to a
+# MAGIC $999 outlier. The 99th percentile is $49.99.
 # MAGIC
-# MAGIC The arrow does not point the way it looks. A studio does not become successful by charging $30 —
-# MAGIC it charges $30 because it built something that can carry the price. What the table does say is
-# MAGIC that the $20-40 band is **where games of Ubisoft's scale actually live**, and that pricing a
-# MAGIC premium title below $20 puts it among games that are not competing for the same attention.
+# MAGIC The second half of the question — *are there many games with a discount* — read on the same bands:
 # MAGIC
-# MAGIC That band is not a continuum. Four price points hold 2 310 of its 2 394 games:
-
-# COMMAND ----------
-
-display(outcome(games.filter((F.col("price_usd") >= 20) & (F.col("price_usd") < 40)), "price_usd")
-        .filter(F.col("games") >= 50).orderBy("price_usd"))
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC **$24.99 and $29.99 carry almost the same number of games — 862 and 865 — and not the same
-# MAGIC outcome: 170 median reviews against 496, a 24.9% breakout rate against 36.0%.** Five dollars
-# MAGIC apart, on samples that size, that is the cleanest comparison in this section. And $34.99 breaks
-# MAGIC the ladder rather than continuing it: 155 games, 27.1%, below $29.99. What the band rewards is
-# MAGIC not a higher number, it is landing on one of the two anchors the market reads as premium.
-# MAGIC
-# MAGIC **Decision — price: $29.99 or $39.99.** Which of the two is a budget question, not a market one:
-# MAGIC $39.99 does better on both measures — 730 median reviews, 39.5% — because that is where AAA
-# MAGIC productions sit, and it is their scale doing the work, not their label.
+# MAGIC *Chart: bar, `band` x `pct_discounted`.*
 
 # COMMAND ----------
 
@@ -714,13 +639,28 @@ display(games.filter(F.col("discount_pct") > 0).select(
     F.round(F.avg("discount_pct"), 1).alias("mean_discount"),
     F.percentile_approx("discount_pct", 0.5).alias("median_discount")))
 
+# same bands as above, so the two tables read against each other
+on_sale = F.col("discount_pct") > 0
+display(games.withColumn("rank", band_rank).withColumn("band", price_band)
+        .groupBy("rank", "band").agg(
+            F.count("*").alias("games"),
+            F.sum(on_sale.cast("int")).alias("discounted"),
+            F.round(100 * F.avg(on_sale.cast("int")), 1).alias("pct_discounted"),
+            F.round(F.avg(F.when(on_sale, F.col("discount_pct"))), 1).alias("mean_discount"))
+        .orderBy("rank").drop("rank"))
+
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC Discounts are worth one line: **2 518 games, 4.5% of the catalogue, at a median 60% off**. But
-# MAGIC this is a one-day snapshot, and Steam's sales are periodic — the figure measures the day the data
-# MAGIC was pulled, not how often games go on sale. Nothing in this dataset can answer the second
-# MAGIC question.
+# MAGIC **Not many: 2 518 games are on sale, 4.5% of the catalogue**, at a median 60% off. And the
+# MAGIC discounting is not spread evenly across the store — **1 884 of those 2 518 are games under $5**,
+# MAGIC the band that is already the largest. Rate and depth both fall with every step up: 8.0% of the
+# MAGIC under-$5 games are discounted, at a mean 63.6% off, against 0.5% and 24.7% above $40. Cheap games
+# MAGIC discount often and deep, expensive ones rarely and shallow.
+# MAGIC
+# MAGIC This is a one-day snapshot and Steam's sales are periodic, so it measures the day the file was
+# MAGIC pulled, not how often a game goes on sale. *Are there many games with a discount* has an answer;
+# MAGIC *how often does a game go on sale* does not.
 # MAGIC
 # MAGIC ## 3.4 Languages
 # MAGIC
@@ -745,6 +685,14 @@ display(by_language
 # MAGIC *Chart: combo — bars `games`, line `breakout_pct`, on `languages`.*
 
 # COMMAND ----------
+
+def outcome(df, *group_by):
+    """Volume and the two success measures, for any grouping."""
+    return (df.groupBy(*group_by).agg(
+        F.count("*").alias("games"),
+        F.percentile_approx("reviews", 0.5).alias("median_reviews"),
+        F.round(100 * F.avg((F.col("owners_min") >= 100000).cast("int")), 1).alias("breakout_pct"),
+        F.round(F.avg("positive_ratio"), 3).alias("mean_positive_ratio")))
 
 language_band = (F.when(F.col("n_languages") <= 1, "1")
                   .when(F.col("n_languages") <= 4, "2-4")
@@ -1170,7 +1118,8 @@ display(genre_mix.orderBy(F.desc("pct_2022")).limit(12))
 # MAGIC
 # MAGIC Every genre comparison so far ran on the whole catalogue, where a genre's numbers move with what
 # MAGIC it charges and how much of it is free — which is exactly what 4.4 had to unpick for MMO. This one
-# MAGIC holds both fixed: released from 2018, priced $20-40, the band 3.3 settled on. What is left is
+# MAGIC holds both fixed: released from 2018, priced $20-40 — the premium band a Ubisoft release is
+# MAGIC written for, and 4.3% of the catalogue (3.3). What is left is
 # MAGIC reach and satisfaction, compared on equal commercial ground.
 # MAGIC
 # MAGIC Three of the nine real genres fall below the 150-game floor here — MMO, Racing, Sports — so the
@@ -1359,17 +1308,17 @@ display(games.join(publisher_size, "publisher_clean")
 # MAGIC |---|---|---|
 # MAGIC | **Genre** | Action-RPG, single-player, premium | Action and RPG carry 2.63 M$ and 3.14 M$ of stock value a game at ordinary prices, $7.98 and $9.36; 34.9% and 33.8% breakout in the $20-40 band (4.4, 4.6) |
 # MAGIC | **Not** | live service or MMO | MMO leads on stock value by audience, not by price: a paid MMO averages 381 000 owners against 160 000 for a paid RPG at the same $11 — an audience, and an in-game economy this dataset cannot see, that a premium release cannot buy. And it carries a 0.648 median positive ratio, ten points below the lowest of the eight other real genres (4.2, 4.4) |
-# MAGIC | **Price** | $29.99 or $39.99 | on near-identical samples, $29.99 returns 496 median reviews and a 36.0% breakout rate against $24.99's 170 and 24.9%; $34.99 sits below both (3.3) |
+# MAGIC | **Price** | the $20-40 band | a premise this study controls on rather than a finding: 3.3 measures only that the band holds 4.3% of the catalogue and is barely discounted, and 4.6 compares genres inside it. The point within the band is not decided here |
 # MAGIC | **Platforms** | Windows at launch, Mac and Linux planned in | Windows is 99.97% of the catalogue; ported games lead inside every price band, and porting is not a big-studio behaviour (5.1, 5.3) |
 # MAGIC | **Languages** | thirteen: EN, DE, FR, ES, RU, IT, zh-Hans, JA, pt-BR, PL, KO, zh-Hant, TR | every language added pays up to the thirteenth — 696 median reviews and a 43.2% breakout rate — and the fourteenth reverses it (3.4) |
-# MAGIC | **Window** | February to May | November and December take the most releases and return the least: 19 median reviews and 7.5% breakout, against 26-27 and 9-10% in spring (3.2) |
+# MAGIC | **Window** | the first half of the year | the six lightest release months over 2014-2021 are exactly January to June; October ships 4 451 games against January's 3 096 (3.2) |
 # MAGIC | **Rating** | mature is not a constraint | 12.8% of the catalogue is mature-tagged and outperforms the rest; Steam's own age field is empty for 98.8% of games (3.5) |
 # MAGIC
 # MAGIC Two things this study says about the field the game will land in, beyond the product itself:
 # MAGIC
-# MAGIC - **The competitor set is about thirty publishers, not fifty thousand.** 41% of Steam's catalogue
-# MAGIC   comes from publishers with a single release, and the twenty largest account for 5% of it.
-# MAGIC   Ubisoft's rivals are the names in 3.1's `owners_x_price` table.
+# MAGIC - **The competitor set is in the hundreds, not the fifty thousand.** 41% of Steam's catalogue
+# MAGIC   comes from publishers with a single release; the 195 publishers with 21 releases or more hold
+# MAGIC   17% of it (3.1). That is the field a Ubisoft release lands in.
 # MAGIC - **There is no wave to catch.** The genre mix moved by less than two points in five years. The
 # MAGIC   concept has to win on execution inside a category that already pays, not on timing.
 # MAGIC

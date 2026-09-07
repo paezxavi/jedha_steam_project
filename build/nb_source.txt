@@ -53,6 +53,7 @@ partial and no game released after that date exists here.
 Three of the 22 fields are nested — `tags` (a tag → number-of-votes object), `platforms`
 (three booleans) and `categories` (a list) — which is what makes the file semi-structured and
 what `explode()` and `getField()` are for.
+
 #%% md
 ## 0. Environment
 
@@ -192,6 +193,7 @@ display(
        .select("name", F.explode("tags").alias("tag", "votes"))
        .orderBy(F.desc("votes")).limit(8)
 )
+
 #%% md
 ## 2. Cleaning
 
@@ -415,30 +417,6 @@ report = spark.createDataFrame([
 ], ["rule", "rows_in", "measured", "n"])
 
 display(report)
-#%% md
-### 2.11 How success is measured, from here on
-
-Nothing in this dataset is a sales figure. Two measures stand in, and every comparison in the
-notebook reports both:
-
-- **median review count** — continuous, and it separates the bottom of the catalogue where the
-  owners bracket cannot;
-- **breakout rate** — the share of games that reached at least 100 000 owners.
-
-They are not independent: on the log scale, review count and owner midpoint correlate at
-**0.76**, which is what justifies using reviews as a stand-in for reach at all.
-
-#%% code
-display(games.filter(F.col("reviews") > 0).select(
-    F.round(F.corr(F.log("reviews"), F.log(F.greatest("owners_mid", F.lit(1)))), 3).alias("corr_log_reviews_owners")))
-
-def outcome(df, *group_by):
-    """Volume and the two success measures, for any grouping."""
-    return (df.groupBy(*group_by).agg(
-        F.count("*").alias("games"),
-        F.percentile_approx("reviews", 0.5).alias("median_reviews"),
-        F.round(100 * F.avg((F.col("owners_min") >= 100000).cast("int")), 1).alias("breakout_pct"),
-        F.round(F.avg("positive_ratio"), 3).alias("mean_positive_ratio")))
 
 #%% md
 ---
@@ -450,24 +428,18 @@ def outcome(df, *group_by):
 
 #%% code
 by_publisher = (games.groupBy("publisher_clean")
-    .agg(F.count("*").alias("games"),
-         F.round(F.sum("owners_x_price") / 1e6).alias("owners_x_price_musd"))
+    .agg(F.count("*").alias("games"))
     .filter(F.col("publisher_clean").isNotNull()))
 
 display(by_publisher.orderBy(F.desc("games")).limit(20))
-
-display(games.select(
-    F.countDistinct("publisher_clean").alias("named_publishers"),
-    F.count("*").alias("games"),
-    F.sum(F.col("publisher_clean").isNull().cast("int")).alias("no_publisher")))
 
 #%% md
 **Big Fish Games** has released the most games — 423, casual hidden-object titles — ahead of
 8floor (202) and SEGA (165). Ubisoft is tenth with 128.
 
-That ranking says less than the shape behind it. Steam has **29 824 named publishers for
-55 690 games** (134 of which carry no publisher, and so appear in none of the rankings above),
-and the concentration is the finding:
+That ranking says less than the shape behind it. The 55 690 games spread over 29 824 named
+publishers — 134 games carry no publisher at all, and appear in no ranking here — and the
+concentration is the finding:
 
 #%% code
 buckets = (by_publisher
@@ -486,40 +458,23 @@ orphans = (games.filter(F.col("publisher_clean").isNull())
 concentration = (buckets.unionByName(orphans)
     .withColumn("pct_of_catalogue", F.round(100 * F.col("games") / games.count(), 1)))
 
-display(concentration.orderBy(F.col("size") == "no publisher", "publishers"))
+# the total row holds the two catalogue-wide figures the text above quotes
+total = concentration.agg(
+    F.lit("all").alias("size"),
+    F.sum("publishers").alias("publishers"),
+    F.sum("games").alias("games"),
+    F.round(100 * F.sum("games") / games.count(), 1).alias("pct_of_catalogue"))
+
+display(concentration.unionByName(total)
+        .orderBy(F.col("size").isin("no publisher", "all"), "publishers"))
 
 #%% md
 **41% of the catalogue comes from publishers that have released exactly one game**, and the
 twenty largest publishers together account for 5% of releases. Steam is not a market of a few
-big houses — it is a very long tail with a handful of large firms on the end of it.
-
-Rank the same publishers by `owners_x_price` instead of by volume and a different set of names
-appears. The table below drops the one-game publishers — 23 018 of the 29 824, and the only
-group whose total is a single title by construction. Above that the concentration falls off
-smoothly rather than at a threshold, so `value_per_game_musd` is read next to `games`: on three
-or four releases it is still close to one title's figure.
-
-*Chart: bar, `publisher_clean` x `owners_x_price_musd`.*
-
-#%% code
-display(by_publisher.filter(F.col("games") >= 2)
-                    .withColumn("value_per_game_musd", F.round(F.col("owners_x_price_musd") / F.col("games"), 1))
-                    .orderBy(F.desc("owners_x_price_musd")).limit(20))
+big houses — it is a very long tail, and the 195 publishers with 21 releases or more hold 17%
+of it.
 
 #%% md
-Volume and value are close to unrelated. **Big Fish Games leads on releases with 423 and comes
-177th of the 6 806 publishers with more than one game once the same list is ranked by
-`owners_x_price`.** **For Ubisoft the competitor set is not "everyone on Steam"** — it is the thirty-odd
-publishers in this table.
-
-One caveat on the order. `publisher` is free text, so this ranks spellings, not firms. Across the
-catalogue 175 names appear under 355 different spellings (6.0% of the proxy), and 2 060 strings
-credit several parties at once (16.7%) — 959 of those name a partner that also publishes under
-its own name, which detaches 12.4% of the proxy from firms already present in the ranking. A firm
-that co-publishes and ships Mac and Linux ports is split across many rows; one that always writes
-its name the same way is not. The order rewards naming consistency as much as size, so what this
-table identifies is the set of names, not their sequence.
-
 ## 3.2 The release calendar
 
 *Chart: bar, `release_year` x `games`.*
@@ -528,58 +483,48 @@ table identifies is the set of names, not their sequence.
 per_year = (games.filter(F.col("release_year").isNotNull())
                  .groupBy("release_year").agg(F.count("*").alias("games"))
                  .orderBy("release_year"))
-display(per_year.filter(F.col("release_year") >= 2006))
+display(per_year)
 
 #%% md
-Releases grew every year to 2018, dipped in 2019 (6 968 against 7 678), then **rose through
-Covid — 8 305 in 2020 and 8 823 in 2021**, the two largest years in the dataset. Whatever the
-pandemic did to the industry, it did not slow the flow of new games on Steam; the only visible
-dip is *before* it.
+Two things are stacked in this column, and they separate around 2013. Before it the table counts
+a curated storefront rather than a market: Steam only opened to third-party publishers in 2005
+(Rag Doll Kung Fu and Darwinia, appid 1002 and 1500), and Valve picked by hand what went on sale
+— 61 games in 2006, still only 471 in 2013. Greenlight opens the gate at the end of 2012 and
+Steam Direct replaces it in 2017, and the two jumps in the table sit on that calendar: **471 to
+1 557 in 2014**, then **4 185 to 6 017 in 2017**. Those two dates are Steam's history and not a
+measurement from this file, but they are why the early years cannot be read as an industry
+releasing fewer games. Those years are also a survivors' list — a November 2022 snapshot holds
+only what was still on sale (section 7).
 
-2022 shows 7 455, but the snapshot stops on 11 November, so that year covers ten and a half
-months. At the 2022 daily pace it would have landed around 8 600 — flat against 2021, not down.
+**Covid neither slowed releases nor set them off.** 7 678 in 2018, 6 968 in 2019, then 8 305 in
+2020 and 8 823 in 2021: the only dip is the year *before* the pandemic, and 2020-2021 extends a
+plateau that starts in 2018 rather than breaking it. 2022 reads 7 455, but `last_release` in 2.3
+is 11 November 2022 — that year is ten and a half months long, and its fall is an artefact.
+
+Inside the year, over the eight complete years from 2014, where the jump above turns the
+catalogue into a market, to 2021, the last full year the snapshot covers:
+
+*Chart: bar, `release_month` x `games`.*
 
 #%% code
-display(games.filter(F.col("release_year") == 2022)
+display(games.filter(F.col("release_year").between(2014, 2021))
              .groupBy("release_month").agg(F.count("*").alias("games")).orderBy("release_month"))
 
 #%% md
-Within the year, the question that matters for a launch is not how many games ship in a month
-but how the games that ship in it do. Restricted to paid games from the seven complete years
-2015-2021:
+The calendar is not flat. **October is the busiest month at 4 451 releases and January the
+quietest at 3 096**, 44% apart, and the shape is a season rather than noise: the six lightest
+months of the year are exactly January to June, the six heaviest exactly July to December, with
+a second trough in June. The second half is the run-up to the holiday sales, and it is where the
+competition for a store slot sits.
 
-*Chart: combo — bars `games`, line `median_reviews`, on `release_month`.*
+The table counts competitors, not buyers — it says how many games a launch shares its month
+with, and nothing about whether shipping next to them costs or pays.
 
-#%% code
-display(outcome(games.filter(F.col("release_year").between(2015, 2021) & ~F.col("is_free")), "release_month")
-        .orderBy("release_month"))
-
-#%% md
-**November and December are the worst months to launch in** — median 19 reviews and a 7.5%
-breakout rate, against 26-27 reviews and 9-10% in February to May. October and November take the
-most releases and return the least attention per release. The holiday window belongs to the
-titles that can buy visibility in it.
-
-**Decision — release window: February to May, and not November or December.**
+**Decision — release window: the first half of the year, and not the September-December ramp.**
 
 ## 3.3 Price
 
-*Chart: bar, `price_usd` x `games`, on the 12 most common price points.*
-
-#%% code
-display(games.filter(~F.col("is_free")).select(
-    F.round(F.percentile_approx("price_usd", 0.5), 2).alias("median_paid"),
-    F.round(F.percentile_approx("price_usd", 0.9), 2).alias("p90"),
-    F.round(F.percentile_approx("price_usd", 0.99), 2).alias("p99")))
-
-display(games.groupBy("price_usd").agg(F.count("*").alias("games")).orderBy(F.desc("games")).limit(12))
-
-#%% md
-Steam prices are anchored on `.99`: after the 7 779 free games, the catalogue piles up on $4.99,
-$9.99 and $0.99. The median paid game is **$5.99** and the 99th percentile is $49.99 — a $70
-release is off this chart entirely.
-
-*Chart: combo — bars `games`, line `breakout_pct`, on `band`.*
+*Chart: bar, `band` x `games`.*
 
 #%% code
 # band_rank carries the ordering, so the labels can read as prices and nothing else
@@ -597,36 +542,32 @@ price_band = (F.when(band_rank == 0, "free")
                .when(band_rank == 4, "$20-40")
                .otherwise("$40+"))
 
-display(outcome(games.withColumn("rank", band_rank).withColumn("band", price_band),
-                "rank", "band")
+display(games.filter(~F.col("is_free")).select(
+    F.round(F.min("price_usd"), 2).alias("min_paid"),
+    F.round(F.percentile_approx("price_usd", 0.5), 2).alias("median_paid"),
+    F.round(F.avg("price_usd"), 2).alias("mean_paid"),
+    F.round(F.stddev("price_usd"), 2).alias("stddev_paid"),
+    F.round(F.percentile_approx("price_usd", 0.9), 2).alias("p90"),
+    F.round(F.percentile_approx("price_usd", 0.99), 2).alias("p99"),
+    F.round(F.max("price_usd"), 2).alias("max_paid"),
+    F.round(100 * F.avg(((F.col("price").cast("int") % 100) == 99).cast("int")), 1).alias("pct_ends_99")))
+
+display(games.withColumn("rank", band_rank).withColumn("band", price_band)
+        .groupBy("rank", "band").agg(
+            F.count("*").alias("games"),
+            F.round(100 * F.count("*") / games.count(), 1).alias("pct_games"))
         .orderBy("rank").drop("rank"))
 
 #%% md
-Every step up the price ladder buys more of both measures: from 15 median reviews and a 5.9%
-breakout rate under $5, to **378 reviews and 31.9% in the $20-40 band**. Above $40 the sample
-thins to 567 games and stops improving.
+Steam is a cheap store, and it prices in `.99`: **95.6% of paid games end on those two digits**.
+The mass sits at the bottom — **under $5 alone is 42.2% of the catalogue**, the largest band of
+the six, and free or under $10 is 78.6% of it. The paid median is $5.99 against a mean of $8.99;
+that gap, and a standard deviation of $11.30 on that mean, is a thin tail stretching right to a
+$999 outlier. The 99th percentile is $49.99.
 
-The arrow does not point the way it looks. A studio does not become successful by charging $30 —
-it charges $30 because it built something that can carry the price. What the table does say is
-that the $20-40 band is **where games of Ubisoft's scale actually live**, and that pricing a
-premium title below $20 puts it among games that are not competing for the same attention.
+The second half of the question — *are there many games with a discount* — read on the same bands:
 
-That band is not a continuum. Four price points hold 2 310 of its 2 394 games:
-
-#%% code
-display(outcome(games.filter((F.col("price_usd") >= 20) & (F.col("price_usd") < 40)), "price_usd")
-        .filter(F.col("games") >= 50).orderBy("price_usd"))
-
-#%% md
-**$24.99 and $29.99 carry almost the same number of games — 862 and 865 — and not the same
-outcome: 170 median reviews against 496, a 24.9% breakout rate against 36.0%.** Five dollars
-apart, on samples that size, that is the cleanest comparison in this section. And $34.99 breaks
-the ladder rather than continuing it: 155 games, 27.1%, below $29.99. What the band rewards is
-not a higher number, it is landing on one of the two anchors the market reads as premium.
-
-**Decision — price: $29.99 or $39.99.** Which of the two is a budget question, not a market one:
-$39.99 does better on both measures — 730 median reviews, 39.5% — because that is where AAA
-productions sit, and it is their scale doing the work, not their label.
+*Chart: bar, `band` x `pct_discounted`.*
 
 #%% code
 display(games.filter(F.col("discount_pct") > 0).select(
@@ -635,11 +576,26 @@ display(games.filter(F.col("discount_pct") > 0).select(
     F.round(F.avg("discount_pct"), 1).alias("mean_discount"),
     F.percentile_approx("discount_pct", 0.5).alias("median_discount")))
 
+# same bands as above, so the two tables read against each other
+on_sale = F.col("discount_pct") > 0
+display(games.withColumn("rank", band_rank).withColumn("band", price_band)
+        .groupBy("rank", "band").agg(
+            F.count("*").alias("games"),
+            F.sum(on_sale.cast("int")).alias("discounted"),
+            F.round(100 * F.avg(on_sale.cast("int")), 1).alias("pct_discounted"),
+            F.round(F.avg(F.when(on_sale, F.col("discount_pct"))), 1).alias("mean_discount"))
+        .orderBy("rank").drop("rank"))
+
 #%% md
-Discounts are worth one line: **2 518 games, 4.5% of the catalogue, at a median 60% off**. But
-this is a one-day snapshot, and Steam's sales are periodic — the figure measures the day the data
-was pulled, not how often games go on sale. Nothing in this dataset can answer the second
-question.
+**Not many: 2 518 games are on sale, 4.5% of the catalogue**, at a median 60% off. And the
+discounting is not spread evenly across the store — **1 884 of those 2 518 are games under $5**,
+the band that is already the largest. Rate and depth both fall with every step up: 8.0% of the
+under-$5 games are discounted, at a mean 63.6% off, against 0.5% and 24.7% above $40. Cheap games
+discount often and deep, expensive ones rarely and shallow.
+
+This is a one-day snapshot and Steam's sales are periodic, so it measures the day the file was
+pulled, not how often a game goes on sale. *Are there many games with a discount* has an answer;
+*how often does a game go on sale* does not.
 
 ## 3.4 Languages
 
@@ -661,6 +617,14 @@ French (13 426), Russian (12 922), Simplified Chinese (12 782), Spanish (12 233)
 *Chart: combo — bars `games`, line `breakout_pct`, on `languages`.*
 
 #%% code
+def outcome(df, *group_by):
+    """Volume and the two success measures, for any grouping."""
+    return (df.groupBy(*group_by).agg(
+        F.count("*").alias("games"),
+        F.percentile_approx("reviews", 0.5).alias("median_reviews"),
+        F.round(100 * F.avg((F.col("owners_min") >= 100000).cast("int")), 1).alias("breakout_pct"),
+        F.round(F.avg("positive_ratio"), 3).alias("mean_positive_ratio")))
+
 language_band = (F.when(F.col("n_languages") <= 1, "1")
                   .when(F.col("n_languages") <= 4, "2-4")
                   .when(F.col("n_languages") <= 9, "5-9")
@@ -817,6 +781,7 @@ review volume constant its catalogue sits below the market in every band it occu
 against 79.4% between 100 and 999 reviews, 78.8% against 85.5% between 1 000 and 9 999, 83.0%
 against 89.4% above 10 000.** The bar for the next game is not the top of the list — it is
 Ubisoft's own back catalogue, and that bar currently sits under the market's.
+
 #%% md
 ---
 # 4. Genres
@@ -1032,7 +997,8 @@ it needs to be good in a category that already pays.
 
 Every genre comparison so far ran on the whole catalogue, where a genre's numbers move with what
 it charges and how much of it is free — which is exactly what 4.4 had to unpick for MMO. This one
-holds both fixed: released from 2018, priced $20-40, the band 3.3 settled on. What is left is
+holds both fixed: released from 2018, priced $20-40 — the premium band a Ubisoft release is
+written for, and 4.3% of the catalogue (3.3). What is left is
 reach and satisfaction, compared on equal commercial ground.
 
 Three of the nine real genres fall below the 150-game floor here — MMO, Racing, Sports — so the
@@ -1090,6 +1056,7 @@ in the catalogue rather than a compromise between two separate genres.
 **Decision — genre: Action-RPG, single-player, premium.** Not Casual (15.2%, here). Not live
 service (0.648 satisfaction in 4.2, an audience 4.4 shows a premium release cannot buy). Not
 Indie-positioned — a funding label rather than a genre (4.1), and not a claim Ubisoft can make.
+
 #%% md
 ---
 # 5. Platforms
@@ -1184,6 +1151,7 @@ covers the Steam Deck, which shipped in February 2022 and is not yet visible in 
 
 **Decision — platforms: Windows at launch, Mac and Linux planned in. Linux is the Steam Deck
 route and the cheaper of the two to add once the engine is portable.**
+
 #%% md
 ---
 # 6. The brief for the next game
@@ -1194,17 +1162,17 @@ Six decisions, each from the section that produced it.
 |---|---|---|
 | **Genre** | Action-RPG, single-player, premium | Action and RPG carry 2.63 M$ and 3.14 M$ of stock value a game at ordinary prices, $7.98 and $9.36; 34.9% and 33.8% breakout in the $20-40 band (4.4, 4.6) |
 | **Not** | live service or MMO | MMO leads on stock value by audience, not by price: a paid MMO averages 381 000 owners against 160 000 for a paid RPG at the same $11 — an audience, and an in-game economy this dataset cannot see, that a premium release cannot buy. And it carries a 0.648 median positive ratio, ten points below the lowest of the eight other real genres (4.2, 4.4) |
-| **Price** | $29.99 or $39.99 | on near-identical samples, $29.99 returns 496 median reviews and a 36.0% breakout rate against $24.99's 170 and 24.9%; $34.99 sits below both (3.3) |
+| **Price** | the $20-40 band | a premise this study controls on rather than a finding: 3.3 measures only that the band holds 4.3% of the catalogue and is barely discounted, and 4.6 compares genres inside it. The point within the band is not decided here |
 | **Platforms** | Windows at launch, Mac and Linux planned in | Windows is 99.97% of the catalogue; ported games lead inside every price band, and porting is not a big-studio behaviour (5.1, 5.3) |
 | **Languages** | thirteen: EN, DE, FR, ES, RU, IT, zh-Hans, JA, pt-BR, PL, KO, zh-Hant, TR | every language added pays up to the thirteenth — 696 median reviews and a 43.2% breakout rate — and the fourteenth reverses it (3.4) |
-| **Window** | February to May | November and December take the most releases and return the least: 19 median reviews and 7.5% breakout, against 26-27 and 9-10% in spring (3.2) |
+| **Window** | the first half of the year | the six lightest release months over 2014-2021 are exactly January to June; October ships 4 451 games against January's 3 096 (3.2) |
 | **Rating** | mature is not a constraint | 12.8% of the catalogue is mature-tagged and outperforms the rest; Steam's own age field is empty for 98.8% of games (3.5) |
 
 Two things this study says about the field the game will land in, beyond the product itself:
 
-- **The competitor set is about thirty publishers, not fifty thousand.** 41% of Steam's catalogue
-  comes from publishers with a single release, and the twenty largest account for 5% of it.
-  Ubisoft's rivals are the names in 3.1's `owners_x_price` table.
+- **The competitor set is in the hundreds, not the fifty thousand.** 41% of Steam's catalogue
+  comes from publishers with a single release; the 195 publishers with 21 releases or more hold
+  17% of it (3.1). That is the field a Ubisoft release lands in.
 - **There is no wave to catch.** The genre mix moved by less than two points in five years. The
   concept has to win on execution inside a category that already pays, not on timing.
 
@@ -1236,3 +1204,4 @@ that were pulled never appear — the breakout rates are, if anything, optimisti
 
 **One store, one region.** Steam is not consoles, not mobile, not the Epic store, and the prices
 are US dollars.
+
