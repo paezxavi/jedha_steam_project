@@ -105,7 +105,13 @@ else:
     spark.sparkContext.setLogLevel("ERROR")
 
     def display(x, n=1000):
-        _ipython_display(x.limit(n).toPandas() if isinstance(x, DataFrame) else x)
+        if isinstance(x, DataFrame):
+            # toPandas() widens a nullable int column to float; Int64 keeps it an
+            # integer with <NA>, which is what Databricks' own display() shows.
+            ints = [f.name for f in x.schema.fields
+                    if isinstance(f.dataType, (IntegerType, LongType))]
+            x = x.limit(n).toPandas().astype({c: "Int64" for c in ints})
+        _ipython_display(x)
 
     def materialise(df, name):
         return df.cache()
@@ -113,8 +119,8 @@ else:
     DATA_PATH = "data/steam_game_output.json"
 
 from pyspark.sql import functions as F, Window
-from pyspark.sql.types import (StructType, StructField, StringType, LongType,
-                               BooleanType, ArrayType, MapType)
+from pyspark.sql.types import (StructType, StructField, StringType, IntegerType,
+                               LongType, BooleanType, ArrayType, MapType)
 
 print("Spark", spark.version, "| Databricks" if IS_DATABRICKS else "| local", "|", DATA_PATH)
 
@@ -678,21 +684,17 @@ display(by_language
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC **English is on 99% of the catalogue** and is not a decision. The next tier is: German (14 019),
-# MAGIC French (13 426), Russian (12 922), Simplified Chinese (12 782), Spanish (12 233), Japanese
-# MAGIC (10 368), Italian (9 304). The real question is how far down that list to go.
+# MAGIC **English is on 99% of the catalogue** and is not a decision — a game that ships in one language
+# MAGIC ships in English. Below it comes a block of seven: German 25.2%, French 24.1%, Russian 23.2%,
+# MAGIC Simplified Chinese 23.0%, Spanish 22.0%, Japanese 18.6%, Italian 16.7%. Then the list steps down
+# MAGIC — Portuguese-Brazil 12.1%, Korean 11.9% — and the twentieth name is already at 3.5%. The widest
+# MAGIC step in the tail is the one just after Italian, 16.7% to 12.1%.
 # MAGIC
-# MAGIC *Chart: combo — bars `games`, line `breakout_pct`, on `languages`.*
+# MAGIC Which languages is one count. How many of them a game carries is another:
+# MAGIC
+# MAGIC *Chart: bar, `languages` x `games`.*
 
 # COMMAND ----------
-
-def outcome(df, *group_by):
-    """Volume and the two success measures, for any grouping."""
-    return (df.groupBy(*group_by).agg(
-        F.count("*").alias("games"),
-        F.percentile_approx("reviews", 0.5).alias("median_reviews"),
-        F.round(100 * F.avg((F.col("owners_min") >= 100000).cast("int")), 1).alias("breakout_pct"),
-        F.round(F.avg("positive_ratio"), 3).alias("mean_positive_ratio")))
 
 language_band = (F.when(F.col("n_languages") <= 1, "1")
                   .when(F.col("n_languages") <= 4, "2-4")
@@ -701,112 +703,116 @@ language_band = (F.when(F.col("n_languages") <= 1, "1")
                   .when(F.col("n_languages") <= 20, "15-20")
                   .otherwise("21+"))
 
-display(outcome(games.withColumn("languages", language_band), "languages")
-        .orderBy(F.desc("median_reviews")))
+# min(n_languages) orders the bands without restating the thresholds a second time
+display(games.withColumn("languages", language_band)
+        .groupBy("languages").agg(
+            F.count("*").alias("games"),
+            F.round(100 * F.count("*") / games.count(), 1).alias("pct_games"),
+            F.min("n_languages").alias("floor"))
+        .orderBy("floor").drop("floor"))
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC Localisation tracks success up to about twenty languages — 16 median reviews and a 7% breakout
-# MAGIC rate at a single language, **360 reviews and 39% at 15-20 languages** — and then collapses at 21+.
+# MAGIC **Localisation is the exception on Steam. 29 665 games — 53.3% of the catalogue — ship in a
+# MAGIC single language**, another 23.4% stop at four, and only 5 622, one game in ten, carry more than
+# MAGIC nine.
 # MAGIC
-# MAGIC That collapse mixes two things: how many languages a game ships, and what it costs — price being
-# MAGIC the strongest predictor in this section. Holding the price band fixed separates them, the way 5.3
-# MAGIC does for ports:
-
-# COMMAND ----------
-
-display(outcome(games.filter((F.col("price_usd") >= 10) & (F.col("price_usd") < 20))
-                     .withColumn("languages", language_band), "languages")
-        .orderBy(F.desc("median_reviews")))
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC The collapse survives the control. Among games priced $10-20, **21 languages or more returns 60
-# MAGIC median reviews and a 26.3% breakout rate, against 816 and 42.3% at 15-20 languages** and 703 and
-# MAGIC 38.8% at 10-14 — it lands just above the 2-4 band. Adding a language string costs nothing and
-# MAGIC proves nothing. The band that means something is 10-20, where the localisation is real work.
+# MAGIC So the ranking above is a shortlist, not a description of the average game: English because it
+# MAGIC is not a choice, then the seven names between 16.7% and 25.2%. What the two tables measure is
+# MAGIC prevalence and order, not payoff — they say which languages the market translates into, and how
+# MAGIC rarely it bothers.
 # MAGIC
-# MAGIC How far into that band to go is the actual decision, and counting one language at a time answers
-# MAGIC it:
-
-# COMMAND ----------
-
-display(outcome(games.filter(F.col("n_languages").between(9, 15)), "n_languages")
-        .orderBy("n_languages"))
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC **Every language added pays up to the thirteenth — 175 median reviews and a 28.7% breakout rate at
-# MAGIC nine, 696 and 43.2% at thirteen — and the fourteenth takes it back: 299 and 34.8% over 408
-# MAGIC games.** That reversal is the return threshold, and it settles the count on its own.
-# MAGIC
-# MAGIC Which thirteen is a second question, and the catalogue ranking above is the wrong one to answer
-# MAGIC it. What matters is the languages the games that actually reached scale ship:
-
-# COMMAND ----------
-
-display(games.filter(F.col("owners_min") >= 100000)
-             .select(F.explode("languages_list").alias("language"))
-             .groupBy("language").agg(F.count("*").alias("breakout_games"))
-             .orderBy(F.desc("breakout_games")).limit(15))
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC The two rankings agree on the set — the same twelve names lead both, reordered, with Spanish and
-# MAGIC Italian higher among the games that broke out than in the catalogue at large. The thirteenth is
-# MAGIC **Turkish**, which sits fourteenth by catalogue volume and thirteenth here.
-# MAGIC
-# MAGIC **Decision — languages: thirteen — EN, DE, FR, ES, RU, IT, zh-Hans, JA, pt-BR, PL, KO, zh-Hant
-# MAGIC and TR.**
+# MAGIC **Decision — languages: English plus the seven-name tier — German, French, Russian, Simplified
+# MAGIC Chinese, Spanish, Japanese, Italian.** Eight in all, cut where the catalogue's own list steps
+# MAGIC down.
 # MAGIC
 # MAGIC ## 3.5 Age restriction
 
 # COMMAND ----------
 
-display(games.groupBy("age_rating").agg(F.count("*").alias("games")).orderBy(F.desc("games")).limit(8))
+display(games.groupBy("age_rating").agg(F.count("*").alias("games")).orderBy("age_rating"))
+
+# the counts the text quotes, which no single row of the table above carries
+display(games.select(
+    F.sum((F.col("age_rating") == 0).cast("int")).alias("rated_0"),
+    F.sum((F.col("age_rating") > 0).cast("int")).alias("rated_above_0"),
+    F.sum((F.col("age_rating") >= 16).cast("int")).alias("rated_16_plus"),
+    F.sum(F.col("age_rating").isNull().cast("int")).alias("out_of_range_null"),
+    F.count("*").alias("games")))
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC Read literally, **only 656 games out of 55 690 (1.2%) carry any age restriction at all**, and 301
-# MAGIC are 16+ or over. That is not a description of Steam's catalogue, it is a description of a field
-# MAGIC nobody fills in: the store gates mature content through its own content descriptors, and
-# MAGIC `required_age` is a legacy attribute left at 0.
+# MAGIC Read literally, **only 656 games out of 55 690 (1.2%) carry any age restriction, and 301 are 16+
+# MAGIC or over**. That is a fact about the field, not about the catalogue. Steam does not gate on
+# MAGIC `required_age` at all: the store keys its age screens off the content descriptors a developer
+# MAGIC declares in the mature content survey, and off regional board ratings such as ESRB and PEGI
+# MAGIC ([Steamworks](https://partner.steamgames.com/doc/store/age_gate)). This file carries neither, and
+# MAGIC `required_age` is left at 0 by almost everyone.
 # MAGIC
-# MAGIC The community tags do carry the signal, so the brief's question is better answered with them.
-# MAGIC
-# MAGIC *Chart: bar, `mature` x `breakout_pct`.*
+# MAGIC The community tags are the only proxy available, and Steam's five descriptors split them in two.
+# MAGIC Only **Adult Only Sexual Content** and **Frequent Nudity or Sexual Content** require the viewer to
+# MAGIC affirm they are eighteen; **Some Nudity or Sexual Content**, **Frequent Violence or Gore** and
+# MAGIC **General Mature Content** are disclosures, not barriers. The brief asks which games are
+# MAGIC *prohibited*, so the two readings are counted separately.
 
 # COMMAND ----------
 
-MATURE_TAGS = ["Violent", "Gore", "Nudity", "Sexual Content", "NSFW", "Hentai", "Mature"]
+# Tags grouped the way Steam's own content descriptors group: the first list maps to the
+# two that force an 18+ affirmation, the second adds the three that only disclose.
+AGE_GATED = ["Hentai", "NSFW"]
+DISCLOSED = AGE_GATED + [
+    "Nudity", "Sexual Content",                                    # some nudity or sexual content
+    "Gore", "Violent", "Blood",                                    # frequent violence or gore
+    "Mature", "Horror", "Survival Horror", "Psychological Horror",  # general mature content
+    "Zombies", "Crime", "War", "World War I", "World War II", "Cold War",
+    "Dark", "Dark Fantasy", "Dark Humor", "Dark Comedy", "Demons", "Psychological",
+    "Gambling", "Assassin", "Villain Protagonist", "Heist"]
 
-games = games.withColumn("mature",
-    F.size(F.array_intersect(F.map_keys("tags"), F.array(*[F.lit(t) for t in MATURE_TAGS]))) > 0)
+def has_tag(tags):
+    return F.size(F.array_intersect(F.map_keys("tags"),
+                                    F.array(*[F.lit(t) for t in tags]))) > 0
 
-display(outcome(games, "mature"))
-print("mature-tagged games that also declare an age rating:",
-      games.filter(F.col("mature") & (F.col("age_rating") > 0)).count(),
-      "of", games.filter("mature").count())
+games = (games.withColumn("age_gated", has_tag(AGE_GATED))
+              .withColumn("mature", has_tag(DISCLOSED)))
+
+group_rank = (F.when(F.col("age_rating") == 0, 0)
+               .when(F.col("age_rating") < 16, 1)
+               .when(F.col("age_rating") >= 16, 2)
+               .otherwise(3))
+age_group = (F.when(group_rank == 0, "none declared")
+              .when(group_rank == 1, "1-15")
+              .when(group_rank == 2, "16+")
+              .otherwise("unparsed"))
+
+display(games.withColumn("rank", group_rank).withColumn("age_group", age_group)
+        .groupBy("rank", "age_group").agg(
+            F.count("*").alias("games"),
+            F.sum(F.col("age_gated").cast("int")).alias("age_gated"),
+            F.round(100 * F.avg(F.col("age_gated").cast("int")), 1).alias("pct_gated"),
+            F.sum(F.col("mature").cast("int")).alias("any_mature"),
+            F.round(100 * F.avg(F.col("mature").cast("int")), 1).alias("pct_mature"))
+        .orderBy("rank").drop("rank"))
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC **7 103 games — 12.8% of the catalogue — carry mature content tags**, and only 388 of them
-# MAGIC declare an age rating for it. They also do better than the rest: median 71 reviews against 23,
-# MAGIC and a 19.6% breakout rate against 10.8%.
+# MAGIC The field is not noise, it is abandoned. **Where it is filled in it agrees with the tags — 88.0%
+# MAGIC of the games declaring 16+ carry a mature tag**, against 28.7% of those declaring nothing. But
+# MAGIC 15 786 games carry one and declare nothing at all.
 # MAGIC
-# MAGIC Caution on the direction: mature themes are concentrated in the kind of large action and RPG
-# MAGIC titles that would outperform anyway. The table is not evidence that adding blood sells copies.
-# MAGIC It is evidence that **a mature rating is not a commercial handicap on Steam**, which is the only
-# MAGIC thing the decision needs.
+# MAGIC The strict reading runs the other way. **807 games carry the two tags that map to Steam's
+# MAGIC age-affirmation descriptors, and 786 of them declare nothing**; only 18 of the 301 declared 16+
+# MAGIC games are in that set, 6.0%. Whether Steam's own adult filter already gates them and makes the
+# MAGIC field redundant, or the publishers who ship them simply fill nothing in, this file cannot say.
 # MAGIC
-# MAGIC **Decision — age rating: mature (17+/PEGI 18) is not a constraint on the concept.**
-# MAGIC
+# MAGIC **The brief's question has three answers, not one: 301 games by the metadata field, 807 by the
+# MAGIC strictest content reading, 16 295 — 29.3% of the catalogue — by the broadest.**
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC ## 3.6 The best rated games
 
 # COMMAND ----------
@@ -844,9 +850,7 @@ display(games.select("name", "publisher_clean", "reviews",
 # MAGIC scale are **People Playground at 98.9% over 144 569 reviews and Portal 2 at 98.8% over 309 441** —
 # MAGIC the more useful benchmark, because sustaining the ratio at that volume is the hard part.
 # MAGIC
-# MAGIC Where Ubisoft's own catalogue sits against that needs the review volume held constant: the
-# MAGIC positive ratio climbs with the number of reviews, so comparing Ubisoft to the catalogue at large
-# MAGIC would be comparing it to 39 195 games nobody reviewed.
+# MAGIC Where Ubisoft's own catalogue sits against the market's median ratio, band by band:
 
 # COMMAND ----------
 
@@ -1006,84 +1010,59 @@ display(genre_rows.filter(F.col("publisher_clean").rlike("^Ubisoft"))
 # MAGIC `owners_x_price` averaged over each genre, in millions (2.9 defines it). For one game it is every
 # MAGIC copy anyone owns, priced at the store's list price and added up; the column averages that over
 # MAGIC the genre's games. **It is a total accumulated since release — not a price, and not a yearly
-# MAGIC figure.** `mean_price_usd` sits next to it for exactly that reason: what one copy costs, in the
-# MAGIC same table as what all the copies add up to. `pct_free` says how much of the genre the proxy
-# MAGIC scores at zero.
+# MAGIC figure.** Price sits next to it for that reason: what one copy costs, in the same table as what
+# MAGIC all the copies add up to.
 # MAGIC
-# MAGIC *Chart: bar, `genre` x `stock_value_musd`.*
+# MAGIC Both are read twice, over the whole genre and over its paid games only. A list price of zero
+# MAGIC times any number of owners is zero, so every free game enters the first reading as a zero it
+# MAGIC never earned, and `games` against `paid_games` says how much of each genre that is.
+# MAGIC
+# MAGIC *Chart: bar, `genre` x `stock_value_paid_musd`.*
 
 # COMMAND ----------
+
+paid = ~F.col("is_free")
 
 display(genre_rows.groupBy("genre")
         .agg(F.count("*").alias("games"),
-             F.round(F.avg("owners_x_price") / 1e6, 2).alias("stock_value_musd"),
+             F.sum(paid.cast("int")).alias("paid_games"),
              F.round(F.avg("initial_price_usd"), 2).alias("mean_price_usd"),
-             F.round(100 * F.avg(F.col("is_free").cast("int")), 1).alias("pct_free"))
+             F.round(F.avg(F.when(paid, F.col("initial_price_usd"))), 2).alias("mean_price_paid"),
+             F.round(F.avg("owners_x_price") / 1e6, 2).alias("stock_value_musd"),
+             F.round(F.avg(F.when(paid, F.col("owners_x_price"))) / 1e6, 2)
+              .alias("stock_value_paid_musd"))
         .filter(F.col("games") >= 150)
-        .orderBy(F.desc("stock_value_musd")))
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC **Massively Multiplayer leads at 5.14 M$ a game, ahead of RPG at 3.14 M$ and Action at
-# MAGIC 2.63 M$**, while the two largest shelves in the catalogue carry the least: **Indie 0.86 M$ over
-# MAGIC 39 681 games, Casual 0.38 M$ over 22 086**.
-# MAGIC
-# MAGIC `mean_price_usd` says where that spread does *not* come from. Across the nine real genres the
-# MAGIC average price varies by a factor of **1.8**, from $5.20 for MMO to $9.38 for Simulation, while
-# MAGIC the stock value varies by a factor of **13**, from Casual's 0.38 M$ to MMO's 5.14 M$. Choosing a
-# MAGIC genre barely moves the price a studio can ask; it moves how many people end up owning the game. The software labels invert the pair: **the six
-# MAGIC highest prices in the table are all software, $19.11 to $21.36, and not one of them reaches
-# MAGIC 0.85 M$**. That is what a niche tool at a high price looks like.
-# MAGIC
-# MAGIC `pct_free` marks the distortion in the other direction. **Free to Play averages 0.03 M$ a game
-# MAGIC not because free games make no money but because a list price of zero times any number of owners
-# MAGIC is zero** — an in-game economy is invisible here. The same blindness cuts into Massively
-# MAGIC Multiplayer, 53% of which is free.
-# MAGIC
-# MAGIC Which is where `mean_price_usd` has to be read a second time, because it averages those zeros
-# MAGIC too. For a genre that is half free it reports a share of free games dressed up as a price. The
-# MAGIC same three measures on paid games only, where every row has a price a studio could actually set:
-# MAGIC
-# MAGIC *Chart: bar, `genre` x `mean_owners_paid`.*
-
-# COMMAND ----------
-
-display(genre_rows.filter(~F.col("is_free")).groupBy("genre")
-        .agg(F.count("*").alias("paid_games"),
-             F.round(F.avg("initial_price_usd"), 2).alias("mean_price_paid"),
-             F.round(F.avg("owners_x_price") / 1e6, 2).alias("stock_value_paid_musd"),
-             F.round(F.avg("owners_mid")).alias("mean_owners_paid"))
-        .filter(F.col("paid_games") >= 100)
         .orderBy(F.desc("stock_value_paid_musd")))
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC **MMO's $5.20 was not a low price, it was a high share of free games** — and the two columns are
-# MAGIC related by an identity rather than a tendency: `mean_price_usd` is exactly
-# MAGIC `(1 - pct_free) x mean_price_paid`, on every row of the table above to within rounding. It is a
-# MAGIC price multiplied by a participation rate, which is why it cannot be read as a price. On its paid
-# MAGIC half MMO charges **$11.08, the most of any real genre and 2.1 times what the published column
-# MAGIC reports**, and its stock value *rises* to 10.93 M$ instead of falling: the zeros were holding it
-# MAGIC down, not propping it up.
+# MAGIC **Massively Multiplayer leads at 10.93 M$ a paid game, ahead of RPG at 3.67 and Action at
+# MAGIC 3.04**, while the two largest shelves in the catalogue carry the least: **Indie 0.98 M$ over
+# MAGIC 39 681 games, Casual 0.43 M$ over 22 086**.
 # MAGIC
-# MAGIC The damage is specific, and worth knowing because the rest of section 4 keeps reading that
-# MAGIC column. The eight other real genres are **84.5% to 88.7% paid**, so the identity shaves each of
-# MAGIC them by about the same eighth and leaves their order untouched — drop MMO and the price spread is
-# MAGIC 1.62 published against 1.66 paid. **MMO is the one row where half the genre is missing from its
-# MAGIC own average**, which is exactly what made it look cheap. Across all nine the spread is **1.7** on
-# MAGIC paid games, MMO at the top of it rather than the bottom, while the value spread widens from 13
-# MAGIC to **25**.
+# MAGIC The two readings of a genre differ by exactly how much of it is free, and the identity is visible
+# MAGIC in the table: `mean_price_usd` is `mean_price_paid` scaled by `paid_games / games`, on every row
+# MAGIC to within rounding. **The row it wrecks is MMO** — 686 paid games out of 1 460, so the published
+# MAGIC $5.20 was never a low price, it was a 53% share of free games. On its paid half MMO charges
+# MAGIC **$11.08, the most of any real genre**, and its stock value *rises* to 10.93 M$ instead of
+# MAGIC falling: the zeros were holding it down, not propping it up. The eight other real genres run
+# MAGIC 84.5% to 88.7% paid, so the same identity shaves each of them by about an eighth and leaves their
+# MAGIC order untouched.
 # MAGIC
-# MAGIC So the value does come from reach, and here it can be shown rather than inferred: **a paid MMO
-# MAGIC averages 381 000 owners against 160 000 for a paid RPG and 143 000 for a paid Action** — two and
-# MAGIC a half times the audience, at the same price. What a premium single-player release cannot copy is
-# MAGIC that audience and the in-game economy behind it, not a pricing trick.
+# MAGIC **Free to Play is the extreme of it: 149 paid games out of 3 393, $0.30 published against $6.82
+# MAGIC paid, 0.03 M$ against 0.69.** Free games do not earn nothing — a list price of zero times any
+# MAGIC number of owners is zero, and the in-game economy behind them is invisible here.
+# MAGIC
+# MAGIC Where the value comes from is then readable directly. **MMO and RPG charge almost the same,
+# MAGIC $11.08 against $10.97, and MMO carries three times the stock value.** The gap is not what a
+# MAGIC studio can ask, it is how many people end up owning the game — an audience, and an in-game
+# MAGIC economy behind it, that a premium single-player release cannot buy. The software labels make the
+# MAGIC opposite case: **the six highest paid prices in the table, $27.68 to $36.79, are all software,
+# MAGIC and not one of them reaches 1.4 M$.** That is what a niche tool at a high price looks like.
 # MAGIC
 # MAGIC Set against 4.2, where MMO is last on satisfaction, that leaves **RPG and Action: second and
 # MAGIC third on stock value, at ordinary prices, with no satisfaction penalty.**
-# MAGIC
 # MAGIC
 # MAGIC ## 4.5 Is any genre emerging
 # MAGIC
@@ -1129,6 +1108,14 @@ display(genre_mix.orderBy(F.desc("pct_2022")).limit(12))
 # MAGIC *Chart: combo — bars `games`, line `breakout_pct`, on `genre`.*
 
 # COMMAND ----------
+
+def outcome(df, *group_by):
+    """Volume and the two success measures, for any grouping."""
+    return (df.groupBy(*group_by).agg(
+        F.count("*").alias("games"),
+        F.percentile_approx("reviews", 0.5).alias("median_reviews"),
+        F.round(100 * F.avg((F.col("owners_min") >= 100000).cast("int")), 1).alias("breakout_pct"),
+        F.round(F.avg("positive_ratio"), 3).alias("mean_positive_ratio")))
 
 # the band is 3.3's, expressed the same way: [20, 40)
 REAL_GENRES = ["Action", "Adventure", "Casual", "RPG", "Strategy",
