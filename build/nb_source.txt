@@ -916,7 +916,8 @@ to a store category.**
 
 ## 4.3 Do publishers have favourite genres
 
-*Chart: stacked bar, `publisher_clean` x `games`, grouped by `genre`.*
+*Chart: grouped bar, `publisher_clean` x `pct_of_publisher`, grouped by `genre` — not
+stacked, since the same games carry several of these labels.*
 
 #%% code
 top_publishers = [r[0] for r in by_publisher.orderBy(F.desc("games")).limit(8).collect()]
@@ -1045,8 +1046,6 @@ it needs to be good in a category that already pays.
 
 ## 5.1 What Steam runs on
 
-*Chart: bar over the `windows` / `mac` / `linux` columns below.*
-
 #%% code
 display(games.select(
     F.count("*").alias("games"),
@@ -1064,8 +1063,6 @@ of the catalogue. **The largest group on the store is Windows-only: 41 271 games
 of it.**
 
 Where Ubisoft's own catalogue sits against that, read the same way:
-
-*Chart: bar over the same three columns, Ubisoft only.*
 
 #%% code
 display(games.filter(ubisoft).select(

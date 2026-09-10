@@ -1018,7 +1018,8 @@ display(genre_rows.groupBy("genre").agg(
 # MAGIC
 # MAGIC ## 4.3 Do publishers have favourite genres
 # MAGIC
-# MAGIC *Chart: stacked bar, `publisher_clean` x `games`, grouped by `genre`.*
+# MAGIC *Chart: grouped bar, `publisher_clean` x `pct_of_publisher`, grouped by `genre` — not
+# MAGIC stacked, since the same games carry several of these labels.*
 
 # COMMAND ----------
 
@@ -1159,8 +1160,6 @@ display(genre_mix.orderBy(F.desc("pct_2022")).limit(12))
 # MAGIC # 5. Platforms
 # MAGIC
 # MAGIC ## 5.1 What Steam runs on
-# MAGIC
-# MAGIC *Chart: bar over the `windows` / `mac` / `linux` columns below.*
 
 # COMMAND ----------
 
@@ -1182,8 +1181,6 @@ display(games.groupBy("windows", "mac", "linux").agg(F.count("*").alias("games")
 # MAGIC of it.**
 # MAGIC
 # MAGIC Where Ubisoft's own catalogue sits against that, read the same way:
-# MAGIC
-# MAGIC *Chart: bar over the same three columns, Ubisoft only.*
 
 # COMMAND ----------
 
