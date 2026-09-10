@@ -136,9 +136,14 @@ function just calls `cache()`.
 
 ### Screenshots for the jury
 
-Databricks removed the **Publish** button, so the deliverable is the notebook plus screenshots of
-its cell outputs, taken in the workspace and dropped in `images/`. One per numbered section covers
-the whole argument:
+Databricks removed the **Publish** button, so the deliverable is the notebook plus an export that
+carries its rendered outputs: [`steam_project_databricks.html`](steam_project_databricks.html).
+The HTML export is the only one that embeds the visualisations — Databricks attaches them to the
+command result, not to the code, so a `.py` or `.ipynb` export carries the tables and loses the
+charts. Seventeen charts are built in it, one per `*Chart: …*` line in the notebook.
+
+Screenshots, if they are wanted as well, go in `images/`. One per numbered section covers the
+whole argument:
 
 | # | section | output |
 |---|---|---|
@@ -178,6 +183,7 @@ DataFrame API this notebook uses is unchanged between them.
 ```
 steam_project.ipynb              the deliverable: ingestion, cleaning, the three levels, the brief
 steam_project_databricks.py      the same notebook in Databricks source format, for import
+steam_project_databricks.html    the Databricks export, the one that carries the 17 charts
 images/                          screenshots of the Databricks cell outputs
 build/                           source of the notebook and the scripts that build and run it
 data/                            the dataset (not committed — 61 MB, fetched by the commands above)

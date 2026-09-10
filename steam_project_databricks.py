@@ -817,8 +817,6 @@ display(games.withColumn("rank", group_rank).withColumn("age_group", age_group)
 
 # MAGIC %md
 # MAGIC ## 3.6 The best rated games
-# MAGIC
-# MAGIC *Chart: bar, `name` x `wilson_score`, on the fifteen below.*
 
 # COMMAND ----------
 

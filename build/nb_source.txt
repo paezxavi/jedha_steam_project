@@ -739,8 +739,6 @@ strictest content reading, 16 295 — 29.3% of the catalogue — by the broadest
 #%% md
 ## 3.6 The best rated games
 
-*Chart: bar, `name` x `wilson_score`, on the fifteen below.*
-
 #%% code
 print("games with a 100% positive ratio:", games.filter(F.col("positive_ratio") == 1).count())
 display(games.filter(F.col("positive_ratio") == 1)
