@@ -1,6 +1,6 @@
 # What should Ubisoft's next game be?
 
-A market study of the **55 691 games** listed on Steam, run for Ubisoft's studio leadership.
+A market study of the **55 690 games** listed on Steam, run for Ubisoft's studio leadership.
 
 Jedha *Full Stack Data Scientist* — **Block 2, Big Data Project**. PySpark on Databricks.
 
@@ -11,9 +11,9 @@ The analysis, with every cleaning rule and its measured effect, is in
 
 Ubisoft wants to launch a new game and asked for a global reading of the Steam marketplace before
 the concept is locked. The brief lists a dozen questions on three levels — the market as a whole,
-genres, and platforms. The notebook answers them in that order, and each level closes on the one
-thing it changes in the product brief: **genre, price, platforms, languages, release window, age
-rating**.
+genres, and platforms. The notebook answers those twelve questions in that order and stops there.
+Section 6 gathers what the answers imply for a product brief, separating what is measured from
+what is inferred; section 7 lists what the dataset cannot decide at all.
 
 ## The dataset
 
@@ -29,63 +29,91 @@ Three properties drive the whole pipeline:
   441 columns, one per tag. Declared as `MAP<STRING, BIGINT>` it becomes one column that
   `explode()` opens into (tag, votes) rows.
 - **Nothing in the file is a sales figure.** `owners` is a bracket (`"10,000,000 .. 20,000,000"`)
-  and 68% of the catalogue sits in the bottom one, so the notebook measures success with the
-  **median review count** and the **breakout rate** — the share of games above 100 000 owners.
-  On the log scale, reviews and owners correlate at **0.76**.
+  and 68% of the catalogue sits in the bottom one, so its midpoint is `10,000` for two games out
+  of three. The notebook never ranks on it directly: it enters only as one factor of
+  `owners_x_price`, the list-price value of that midpoint, which section 7 takes apart.
 
 ## What we found
 
 ### Steam is a long tail with two hundred companies on the end of it
 
-**41% of the catalogue comes from publishers that have released exactly one game**, and the twenty
-largest account for 5% of releases. Big Fish Games has published the most (423), ahead of 8floor
-(202) and SEGA (165); Ubisoft is tenth with 128. At the other end, 195 publishers have released 21
-games or more and hold 17% of the catalogue — that is the field, not the 29 824 names on the store.
+**41% of the catalogue comes from publishers that have released exactly one game.** Big Fish Games
+has published the most (423), ahead of 8floor (202) and SEGA (165); Ubisoft is tenth with 128. At
+the other end, 195 publishers have released 21 games or more and hold 17% of the catalogue — that
+is the field, not the 29 824 names on the store.
+
+Those large publishers do not spread across genres, they repeat a formula — and usually a *family*
+of labels rather than one genre, since a game carries several at once. Choice of Games is 99.3%
+RPG, 97.1% Indie and 80.0% Adventure **on the same 140 titles**. Six of the eight biggest publish
+to a formula; only SEGA and Strategy First spread.
 
 ### Covid did not slow releases — the dip is the year before
 
 8 305 games in 2020 and 8 823 in 2021, the two largest years in the dataset, against a dip to
 6 968 in 2019 — a plateau that starts in 2018, neither broken nor accelerated by the pandemic.
+Before 2014 the same column counts something else entirely: a curated storefront, 61 games in
+2006 and still only 471 in 2013, which is why the two jumps in it sit on Steam's own calendar
+(Greenlight, then Steam Direct) rather than on the industry's.
+
 Inside the year the calendar is a season: **the six lightest release months are exactly January to
 June**, and October ships 4 451 games against January's 3 096.
 
-### The crowded genres are the poor ones
+### The store is cheap, and it prices in `.99`
 
-Setting each genre's share of proxy revenue against its share of releases, three return more than
-they take — **Massively Multiplayer 2.96, RPG 1.81, Action 1.52** — and two are badly crowded:
-**Casual takes 40% of the shelf for 8.7% of the value, Indie 71% for 35%**.
+**78.6% of the catalogue is free or under $10**, 42.2% under $5 alone, and **95.6% of paid games
+end on those two digits**. The paid median is $5.99 against a mean of $8.99 — a thin tail
+stretching to a $999 outlier. Discounts are rare on any given day, 2 518 games or 4.5%, and they
+are a tactic of the cheap end: **1 884 of those 2 518 are games under $5**, and both the rate and
+the depth fall with every band.
 
-MMO buys the best economics and the worst product: its median positive ratio is **0.665**, fifteen
-points below every other genre. RPG is second on economics with no such penalty.
+### Localisation is the exception, not the rule
 
-### Porting is the cheapest lever, and Windows is not a decision
+English is on **99%** of the catalogue and is not a decision. Below it comes a block of seven —
+German 25.2%, French 24.1%, Russian 23.2%, Simplified Chinese 23.0%, Spanish 22.0%, Japanese
+18.6%, Italian 16.7% — and then the list steps down to 12.1%. But **53.3% of games ship in a
+single language**, and only one game in ten carries more than nine.
 
-**55 675 of 55 690 games support Windows.** Mac reaches 22.9% and Linux 15.2%, and games that
-ship on more than one platform lead on both success measures inside every price band — 494 median
-reviews against 238 at $20-40. Porting rates barely move with publisher size (24.0% / 27.8% /
-26.6%), which removes the obvious confounder without making the relationship causal.
+### The age field is abandoned, so the question has three answers
 
-### The brief that comes out of it
+`required_age` is 0 for 98.8% of the catalogue: Steam gates mature content on developer-declared
+content descriptors, not on this legacy field. Read literally, **301 games are 16+ or over**. Read
+through the community tags mapped onto Steam's own five descriptors, **807 games carry the two
+that force an 18+ affirmation** and **16 295 — 29.3% — carry any mature-content tag**. The field
+is not noise, it is unused: 88% of the games that *do* declare 16+ carry a mature tag.
 
-| | decision |
-|---|---|
-| **Genre** | Action-RPG, single-player, premium — not Casual, not live service |
-| **Price** | the $20-40 band |
-| **Platforms** | Windows at launch, Mac and Linux planned in |
-| **Languages** | twelve: EN, DE, FR, RU, zh-Hans, ES, JA, IT, KO, pt-BR, PL, zh-Hant |
-| **Window** | the first half of the year |
-| **Rating** | mature is not a commercial handicap |
+### The best-paying genre is the worst-liked one
 
-Quality bar: **90% positive is a good Ubisoft-scale result on Steam, 95% at scale is exceptional**
-— Portal 2 sits at 98.8% over 309 441 reviews.
+**Massively Multiplayer leads on value by a wide margin — 10.93 M$ of stock value a paid game,
+three times RPG's 3.67 and Action's 3.04** — while Casual, 40% of the shelf, closes the nine real
+genres at 0.43. And MMO is last of the nine on satisfaction, **0.648 against 0.748 to 0.803 for
+the other eight**, ten points below the lowest of them.
+
+Its cheap published price was an artefact: half of MMO is free, and a list price of zero times any
+number of owners is zero. On its paid half it charges **$11.08, the most of any real genre**.
+
+### Ubisoft is already in the right genres, and behind on quality
+
+Its two largest genres — **Action with 75 titles, Adventure with 49** — are third and second of
+the nine on satisfaction, and it has only 4 games in MMO. But held at equal review volume its
+catalogue sits **four to seven points below the market in the three bands where it has a real
+sample**: above 10 000 reviews the market's median positive ratio is **89.4%** and Ubisoft's own
+39 titles in that band are at **83.0%**. It is ahead only in the 10-99 band, on seven titles.
+
+### Windows is not a decision, and Ubisoft ports less than anyone
+
+**55 675 of the 55 690 games support Windows**, Mac reaches 22.9% and Linux 15.2%, and the largest
+group on the store is Windows-only: **41 271 games, three quarters of it**. Genre barely moves
+that — 18.5% to 27.6% on Mac across the nine real genres, a 1.5 ratio. Ubisoft is the outlier in
+the other direction: **4.4% Mac, 1.5% Linux, and 94.8% of its games Windows-only.**
 
 ## What this data cannot decide
 
-It stops on 11 November 2022. There are no sales, only SteamSpy's brackets, and the revenue proxy
-(`owners x list price`) ignores Steam's cut, regional pricing, discounts, refunds and bundles —
-and values every free-to-play game at zero. Delisted games are absent, so the breakout rates are
-optimistic. And nothing here is causal: price, ports and localisation are all things a studio
-chooses *because* it already expects the game to sell.
+It stops on 11 November 2022, and the Steam Deck is only eight months old in it. There are no
+sales, only SteamSpy's brackets: `owners_x_price` counts what a customer would pay, not what a
+publisher receives, and it values every free game at zero. Reviews stand in for reach throughout,
+and how tightly the two track is not measured. `publisher` is free text, so the rankings rank
+names rather than firms. Delisted games are absent, so every share measured is optimistic. And
+nothing here is causal — a genre is chosen by studios that already expect a game to sell.
 
 ## Running it on Databricks
 
@@ -109,21 +137,26 @@ function just calls `cache()`.
 ### Screenshots for the jury
 
 Databricks removed the **Publish** button, so the deliverable is the notebook plus screenshots of
-its cell outputs, taken in the workspace and dropped in `images/`. Ten are enough to carry the
-whole argument:
+its cell outputs, taken in the workspace and dropped in `images/`. One per numbered section covers
+the whole argument:
 
 | # | section | output |
 |---|---|---|
 | 1 | 1.1 / 1.2 | the 441 columns inference invents for `tags`, then the explicit schema |
 | 2 | 2.10 | the cleaning report |
 | 3 | 3.1 | top publishers by volume, then the concentration table |
-| 4 | 3.2 | releases per year, and releases per month |
-| 5 | 3.3 | the price band table, and discounts by band |
-| 6 | 3.4 | the localisation band table |
-| 7 | 3.6 | the Wilson ranking |
-| 8 | 4.4 | the opportunity scatter |
-| 9 | 4.6 | genre x breakout rate in the $20-40 band |
-| 10 | 5.3 | porting, controlled by price band and by publisher size |
+| 4 | 3.2 | releases per year, then releases per month |
+| 5 | 3.3 | the price spread and the bands, then discounts by band |
+| 6 | 3.4 | the language ranking, then the language bands |
+| 7 | 3.5 | the `age_rating` distribution, then the two tag readings by age group |
+| 8 | 3.6 | the Wilson ranking, then Ubisoft against the market by review band |
+| 9 | 4.1 | the genre shelf |
+| 10 | 4.2 | genres by satisfaction, then Ubisoft's own genres |
+| 11 | 4.3 | the eight largest publishers and their genre families |
+| 12 | 4.4 | value by genre, published and paid |
+| 13 | 4.5 | the genre mix, 2017 against 2022 |
+| 14 | 5.1 | what the store runs on, then what Ubisoft runs on |
+| 15 | 5.2 | porting rates by genre |
 
 ## Running it locally
 
