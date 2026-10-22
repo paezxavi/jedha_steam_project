@@ -5,7 +5,9 @@ A market study of the **55 690 games** listed on Steam, run for Ubisoft's studio
 Jedha *Full Stack Data Scientist* — **Block 2, Big Data Project**. PySpark on Databricks.
 
 The analysis, with every cleaning rule and its measured effect, is in
-[`steam_project.ipynb`](steam_project.ipynb).
+[`steam_project_databricks.py`](steam_project_databricks.py) — the notebook, in Databricks source
+format. Its outputs are in [`images/`](images/) (one screenshot per code cell) and in
+[`steam_project_databricks.pdf`](steam_project_databricks.pdf) (the whole rendered notebook).
 
 ## The problem
 
@@ -117,8 +119,9 @@ nothing here is causal — a genre is chosen by studios that already expect a ga
 
 ## Running it on Databricks
 
-The notebook is written for Databricks and imports either as `.ipynb` or as
-[`steam_project_databricks.py`](steam_project_databricks.py) (Databricks source format).
+The notebook is written for Databricks and imports as
+[`steam_project_databricks.py`](steam_project_databricks.py), the Databricks source format: one
+file, cells separated by `# COMMAND ----------`.
 
 1. **Workspace → Import** the notebook, attach it to serverless compute.
 2. Run it. The first cell creates the Unity Catalog volume `workspace.default.steam` and
@@ -131,61 +134,58 @@ Serverless compute runs Spark 4.2 and has no `cache()`. The two frames the noteb
 most — the cleaned `games` and the exploded `genre_rows` — go through `materialise()` instead,
 which writes them as the Delta tables `workspace.default.steam_games` and
 `workspace.default.steam_genre_rows`. That matters here: the source JSON is a single line, so it
-is non-splittable and every uncached action re-parses all 61 MB in one task. Locally the same
-function just calls `cache()`.
+is non-splittable and every uncached action re-parses all 61 MB in one task.
+
+Section 0 also carries a local-Spark branch (`cache()` instead of Delta tables, a `display()`
+shim). It is the code the Databricks run executed and is kept as is; it is not a maintained way to
+run the project, which lives on Databricks.
 
 ### Screenshots for the jury
 
-Databricks removed the **Publish** button, so the deliverable is the notebook plus an export that
-carries its rendered outputs: [`steam_project_databricks.html`](steam_project_databricks.html).
-The HTML export is the only one that embeds the visualisations — Databricks attaches them to the
-command result, not to the code, so a `.py` or `.ipynb` export carries the tables and loses the
-charts. Seventeen charts are built in it, one per `*Chart: …*` line in the notebook.
+Databricks removed the **Publish** button, and the certification asks for screenshots of the cell
+outputs instead. They are in `images/`: **one PNG per code cell, 37 cells**, named
+`<cell>_<section>…png` after the cell number shown in the Databricks export and the heading the
+cell sits under. A cell whose result also has a chart is captured **twice** — `…_table.png` with
+every result on its Table tab, `…_chart.png` with the Visualization tab open — so the figures and
+the chart that reads them are both there: **17 charts, 54 files**.
 
-Screenshots, if they are wanted as well, go in `images/`. One per numbered section covers the
-whole argument:
+Two complements carry the same outputs in one piece: [`steam_project_databricks.html`](steam_project_databricks.html),
+the Databricks export (the only export that embeds the visualisations — Databricks attaches them
+to the command result, not to the code — but it loads its scripts from the Databricks CDN and opens
+every result on its Table tab), and [`steam_project_databricks.pdf`](steam_project_databricks.pdf),
+the same export rendered with the charts open, 34 A4 pages.
 
-| # | section | output |
-|---|---|---|
-| 1 | 1.1 / 1.2 | the 441 columns inference invents for `tags`, then the explicit schema |
-| 2 | 2.10 | the cleaning report |
-| 3 | 3.1 | top publishers by volume, then the concentration table |
-| 4 | 3.2 | releases per year, then releases per month |
-| 5 | 3.3 | the price spread and the bands, then discounts by band |
-| 6 | 3.4 | the language ranking, then the language bands |
-| 7 | 3.5 | the `age_rating` distribution, then the two tag readings by age group |
-| 8 | 3.6 | the Wilson ranking, then Ubisoft against the market by review band |
-| 9 | 4.1 | the genre shelf |
-| 10 | 4.2 | genres by satisfaction, then Ubisoft's own genres |
-| 11 | 4.3 | the eight largest publishers and their genre families |
-| 12 | 4.4 | value by genre, published and paid |
-| 13 | 4.5 | the genre mix, 2017 against 2022 |
-| 14 | 5.1 | what the store runs on, then what Ubisoft runs on |
-| 15 | 5.2 | porting rates by genre |
+Both the PNGs and the PDF are built from the HTML export by [`capture.py`](capture.py) (headless
+Chromium through Playwright; `python capture.py`, network needed). Two Databricks limits remain in
+the captures: a wide table is cut at the right edge of its grid, and a long table keeps its
+400 px scroll box; the figures behind them are in the HTML export.
 
-## Running it locally
+One row per numbered section is enough to follow the whole argument:
 
-```bash
-python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
-curl -o data/steam_game_output.json \
-  https://full-stack-bigdata-datasets.s3.amazonaws.com/Big_Data/Project_Steam/steam_game_output.json
-```
-
-Then open `steam_project.ipynb` with the `.venv` kernel. The first cell detects that it is not on
-Databricks, builds a local Spark session and defines the `display()` and `materialise()` that
-Databricks provides itself — every other cell is identical in both environments. A **JDK 17**
-must be reachable through `JAVA_HOME`. Local Spark is 3.5.3 against 4.2 on serverless; the
-DataFrame API this notebook uses is unchanged between them.
+| # | section | output | cells |
+|---|---|---|---|
+| 1 | 1.1 / 1.2 | the 441 columns inference invents for `tags`, then the explicit schema | 05, 07 |
+| 2 | 2.10 | the cleaning report | 29 |
+| 3 | 3.1 | top publishers by volume, then the concentration table | 31, 33 |
+| 4 | 3.2 | releases per year, then releases per month | 36, 38 |
+| 5 | 3.3 | the price spread and the bands, then discounts by band | 40, 42 |
+| 6 | 3.4 | the language ranking, then the language bands | 44, 46 |
+| 7 | 3.5 | the `age_rating` distribution, then the two tag readings by age group | 48, 50 |
+| 8 | 3.6 | the Wilson ranking, then Ubisoft against the market by review band | 55, 57 |
+| 9 | 4.1 | the genre shelf | 62 |
+| 10 | 4.2 | genres by satisfaction, then Ubisoft's own genres | 64, 66 |
+| 11 | 4.3 | the eight largest publishers and their genre families | 68 |
+| 12 | 4.4 | value by genre, published and paid | 71 |
+| 13 | 4.5 | the genre mix, 2017 against 2022 | 73 |
+| 14 | 5.1 | what the store runs on, then what Ubisoft runs on | 76, 78 |
+| 15 | 5.2 | porting rates by genre | 80 |
 
 ## Layout
 
 ```
-steam_project.ipynb              the deliverable: ingestion, cleaning, the three levels, the brief
-steam_project_databricks.py      the same notebook in Databricks source format, for import
+steam_project_databricks.py      the notebook: ingestion, cleaning, the three levels, the brief
 steam_project_databricks.html    the Databricks export, the one that carries the 17 charts
-images/                          screenshots of the Databricks cell outputs
-build/                           source of the notebook and the scripts that build and run it
-data/                            the dataset (not committed — 61 MB, fetched by the commands above)
-requirements.txt                 pinned dependencies for a local run
+steam_project_databricks.pdf     the export rendered with the charts open, 34 pages
+images/                          one screenshot per code cell, table and chart
+capture.py                       builds images/ and the PDF from the HTML export
 ```
